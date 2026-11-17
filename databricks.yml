@@ -35,7 +35,6 @@ variables:
     default: energy
   alert_email:
     description: Where job failure emails go
-    default: you@example.com
   schedule_pause:
     description: PAUSED in dev so schedules don't spend money while you build
     default: PAUSED
