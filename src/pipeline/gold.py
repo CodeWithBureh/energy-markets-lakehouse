@@ -164,10 +164,13 @@ def fact_market_daily():
     eu = (
         g("fact_eu_day_ahead_hourly")
         .withColumn("date", F.to_date(F.from_utc_timestamp("hour_utc", "Europe/London")))
-        .groupBy("date").pivot("zone", zones).agg(F.avg("price_gbp_mwh"))
+        # Conditional aggregation instead of pivot (unsupported in Lakeflow pipelines).
+        .groupBy("date").agg(*[
+            F.avg(F.when(F.col("zone") == z, F.col("price_gbp_mwh")))
+            .alias(f"{z.lower()}_avg_price_gbp_mwh")
+            for z in zones
+        ])
     )
-    for z in zones:
-        eu = eu.withColumnRenamed(z, f"{z.lower()}_avg_price_gbp_mwh")
 
     gas = s("gas_prices")
     hh = gas.filter("benchmark = 'henry_hub'").select(

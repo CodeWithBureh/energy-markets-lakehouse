@@ -13,14 +13,49 @@ LANDING = spark.conf.get("energy.landing_root")  # noqa: F821 - `spark` is injec
 BRONZE = spark.conf.get("energy.bronze_schema")  # noqa: F821
 
 
-def autoload(subpath: str, fmt: str, **options):
+# Explicit schemas for the files *we* write (parsed ENTSO-E rows, stocks, ERA5 Parquet) and
+# for FRED. With a schema, Auto Loader can start on an empty folder, so a source whose key
+# isn't set up yet gives an empty table instead of failing the whole pipeline. Unexpected
+# fields go to _rescued_data rather than being lost.
+ENTSOE_SCHEMA = """
+    zone STRING, zone_eic STRING, delivery_start_utc STRING, delivery_end_utc STRING,
+    resolution_minutes BIGINT, position BIGINT, price DOUBLE, is_forward_filled BOOLEAN,
+    currency STRING, price_unit STRING, curve_type STRING, classification_sequence BIGINT,
+    series_mrid STRING, document_mrid STRING
+"""
+FRED_SCHEMA = """
+    series_id STRING, realtime_start STRING, realtime_end STRING,
+    observation_start STRING, observation_end STRING, units STRING, output_type BIGINT,
+    file_type STRING, order_by STRING, sort_order STRING, count BIGINT, offset BIGINT,
+    limit BIGINT,
+    observations ARRAY<STRUCT<realtime_start: STRING, realtime_end: STRING,
+                              date: STRING, value: STRING>>
+"""
+STOCKS_SCHEMA = """
+    ticker STRING, trade_date STRING, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
+    adj_close DOUBLE, volume DOUBLE, dividends DOUBLE, stock_splits DOUBLE,
+    quote_currency STRING
+"""
+# flatten_era5 writes every numeric column as float64, so DOUBLE always matches.
+ERA5_SCHEMA = """
+    valid_time_utc TIMESTAMP, latitude DOUBLE, longitude DOUBLE, t2m DOUBLE, u10 DOUBLE,
+    v10 DOUBLE, u100 DOUBLE, v100 DOUBLE, ssrd DOUBLE
+"""
+
+
+def autoload(subpath: str, fmt: str, schema: str | None = None, **options):
     reader = (
         spark.readStream.format("cloudFiles")  # noqa: F821
         .option("cloudFiles.format", fmt)
-        .option("cloudFiles.inferColumnTypes", "true")
-        .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
         .option("recursiveFileLookup", "true")
     )
+    if schema:
+        reader = reader.schema(schema).option("cloudFiles.schemaEvolutionMode", "rescue")
+    else:
+        reader = (
+            reader.option("cloudFiles.inferColumnTypes", "true")
+            .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
+        )
     for k, v in options.items():
         reader = reader.option(k, v)
     return (
@@ -55,7 +90,7 @@ def elexon_generation_by_fuel():
             "Untouched XML is archived under landing/entsoe/day_ahead_xml.",
 )
 def entsoe_day_ahead():
-    return autoload("entsoe/day_ahead", "json", pathGlobFilter="*.jsonl")
+    return autoload("entsoe/day_ahead", "json", ENTSOE_SCHEMA, pathGlobFilter="*.jsonl")
 
 
 @dlt.table(
@@ -63,7 +98,8 @@ def entsoe_day_ahead():
     comment="Raw FRED observation responses, one row per series per landed file.",
 )
 def fred_observations():
-    return autoload("fred/observations", "json", multiLine="true", pathGlobFilter="*.json")
+    return autoload("fred/observations", "json", FRED_SCHEMA, multiLine="true",
+                    pathGlobFilter="*.json")
 
 
 @dlt.table(
@@ -71,7 +107,7 @@ def fred_observations():
     comment="Daily OHLCV for London-listed energy companies (yfinance), as landed.",
 )
 def stock_daily_prices():
-    return autoload("stocks/daily_prices", "json", pathGlobFilter="*.jsonl")
+    return autoload("stocks/daily_prices", "json", STOCKS_SCHEMA, pathGlobFilter="*.jsonl")
 
 
 @dlt.table(
@@ -79,4 +115,4 @@ def stock_daily_prices():
     comment="ERA5 hourly reanalysis over GB, flattened from NetCDF to Parquet at landing.",
 )
 def era5_gb_hourly():
-    return autoload("era5/gb_hourly", "parquet", pathGlobFilter="*.parquet")
+    return autoload("era5/gb_hourly", "parquet", ERA5_SCHEMA, pathGlobFilter="*.parquet")

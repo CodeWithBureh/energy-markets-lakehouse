@@ -1,6 +1,6 @@
 from datetime import date
 
-from energy_lakehouse.cli import default_window, main
+from energy_lakehouse.cli import build_parser, default_window, main
 
 
 def test_default_windows_overlap_for_revisions():
@@ -16,3 +16,12 @@ def test_cost_guard_blocks_huge_backfill(tmp_path):
                  "--start", "2025-01-01", "--end", "2025-12-31"])
     assert code == 2
     assert not any(tmp_path.iterdir())
+
+
+def test_blank_job_parameters_fall_back_to_default_window():
+    args = build_parser().parse_args(["--source", "elexon", "--landing-root", "x",
+                                      "--start=", "--end="])
+    assert args.start is None and args.end is None
+    args = build_parser().parse_args(["--source", "elexon", "--landing-root", "x",
+                                      "--start=2026-10-01", "--end=2026-10-31"])
+    assert args.start == date(2026, 10, 1) and args.end == date(2026, 10, 31)

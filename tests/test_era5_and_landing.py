@@ -58,3 +58,22 @@ def test_land_bytes_layout_and_no_temp_left(tmp_path):
     assert p == tmp_path / "elexon/system_prices/2026/11/12/system_prices_2026-11-12_RUN1.json"
     assert p.read_bytes() == b"{}"
     assert not list(p.parent.glob("_tmp_*"))
+
+
+def test_flatten_era5_writes_float64_for_bronze_schema(tmp_path):
+    import numpy as np
+    import xarray as xr
+
+    from energy_lakehouse.parsers.era5_netcdf import flatten_era5
+
+    ds = xr.Dataset(
+        {"t2m": (("valid_time", "latitude", "longitude"),
+                 np.full((1, 1, 1), 280.0, dtype="float32"))},
+        coords={"valid_time": [np.datetime64("2026-11-01T00:00")],
+                "latitude": np.array([51.5], dtype="float32"),
+                "longitude": np.array([-0.25], dtype="float32")},
+    )
+    nc = tmp_path / "x.nc"
+    ds.to_netcdf(nc)
+    df = flatten_era5(nc)
+    assert all(df[c].dtype == "float64" for c in ("latitude", "longitude", "t2m"))

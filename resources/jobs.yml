@@ -20,6 +20,13 @@ resources:
           - ${var.alert_email}
       tags:
         project: energy-markets-lakehouse
+      parameters:
+        # Blank = each source's rolling window. Set both to backfill, e.g.
+        #   databricks bundle run -t dev energy_daily --params start=2026-10-01,end=2026-10-31
+        - name: start
+          default: ""
+        - name: end
+          default: ""
       environments:
         - environment_key: ingest
           spec:
@@ -38,6 +45,8 @@ resources:
             entry_point: ingest
             parameters:
               - --source=elexon
+              - --start={{job.parameters.start}}
+              - --end={{job.parameters.end}}
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: ingest_entsoe
@@ -50,6 +59,8 @@ resources:
             entry_point: ingest
             parameters:
               - --source=entsoe
+              - --start={{job.parameters.start}}
+              - --end={{job.parameters.end}}
               - --secret-scope=${var.secret_scope}
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
@@ -63,6 +74,8 @@ resources:
             entry_point: ingest
             parameters:
               - --source=fred
+              - --start={{job.parameters.start}}
+              - --end={{job.parameters.end}}
               - --secret-scope=${var.secret_scope}
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
@@ -76,6 +89,8 @@ resources:
             entry_point: ingest
             parameters:
               - --source=stocks
+              - --start={{job.parameters.start}}
+              - --end={{job.parameters.end}}
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: refresh_pipeline
@@ -103,6 +118,13 @@ resources:
           - ${var.alert_email}
       tags:
         project: energy-markets-lakehouse
+      parameters:
+        # Blank = each source's rolling window. Set both to backfill, e.g.
+        #   databricks bundle run -t dev energy_daily --params start=2026-10-01,end=2026-10-31
+        - name: start
+          default: ""
+        - name: end
+          default: ""
       environments:
         - environment_key: ingest
           spec:
@@ -119,6 +141,8 @@ resources:
             entry_point: ingest
             parameters:
               - --source=era5
+              - --start={{job.parameters.start}}
+              - --end={{job.parameters.end}}
               - --secret-scope=${var.secret_scope}
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
         # No pipeline refresh here: the next daily run picks the new weather files up.

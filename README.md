@@ -45,7 +45,7 @@ flowchart LR
 ## Repo layout
 
 ```
-databricks.yml                 bundle: dev (Free Edition) + prod (Azure) targets
+databricks.yml                 bundle: dev + prod targets in one Azure workspace
 resources/
   storage.yml                  schemas raw/bronze/silver/gold + landing Volume
   pipeline.yml                 one serverless Lakeflow Declarative Pipeline
@@ -57,7 +57,6 @@ src/energy_lakehouse/          ingestion library (built into a wheel)
 src/pipeline/                  bronze.py, silver.py, gold.py (Lakeflow pipeline code)
 tests/                         pytest: clock changes, XML parsing, NetCDF flattening, cost guard
 sql/                           dashboard and FinOps starter queries
-scripts/dev_ingest_and_upload.sh   laptop -> Free Edition Volume (dev only)
 .github/workflows/ci.yml       test on PR, deploy to prod on main
 ```
 
@@ -91,36 +90,102 @@ export ENTSOE_TOKEN=... FRED_API_KEY=... CDS_API_KEY=...
 ingest --source elexon --landing-root ./landing --start 2026-10-24 --end 2026-10-26
 ```
 
-### 3. Dev on Databricks Free Edition (£0)
-Free Edition only allows outbound calls to a list of trusted domains, so ingest on your
-laptop and upload. (If you've verified with LinkedIn and have outbound access, you can run
-the jobs directly.)
-```bash
-databricks auth login --host https://<your-free-edition>.cloud.databricks.com
-# set the dev host in databricks.yml, then:
-databricks bundle deploy -t dev
-databricks bundle summary -t dev            # shows the prefixed Volume path
-DEV_VOLUME=/Volumes/workspace/dev_<you>_raw/landing ./scripts/dev_ingest_and_upload.sh 2026-10-20 2026-10-26
-databricks bundle run -t dev energy_pipeline
-```
+### 3. Azure workspace (shared by dev and prod)
+One workspace hosts both targets. They're kept apart by catalog: dev writes to
+`energy_dev` (with schemas prefixed `dev_<you>_`), prod writes to `energy`.
 
-### 4. Prod on Azure Databricks
 1. **Workspace**: Premium tier, UK South, serverless enabled. Check the managed resource
    group for a **NAT gateway** (~£25–30/month idle). This project only uses serverless, so
    deploy without secure cluster connectivity, or budget for it.
-2. **Catalog**: create a catalog `energy` (managed storage on ADLS Gen2 via the Access Connector).
-3. **Secrets**: create an Azure Key Vault with `entsoe-token`, `fred-api-key`, `cds-api-key`,
-   then a Key Vault-backed secret scope named `energy`.
-4. **Budgets**: in Azure Cost Management, set a budget on the subscription/resource group
+2. **Catalogs**: create `energy_dev` and `energy` (managed storage on ADLS Gen2 via the
+   Access Connector).
+3. **Secrets**: a Key Vault-backed secret scope named `energy`, read by both targets
+   (see [3a](#3a-key-vault-backed-secret-scope)).
+4. **Service principal** for prod (see [3b](#3b-prod-service-principal)).
+5. **Budgets**: in Azure Cost Management, set a budget on the subscription/resource group
    with alerts at £40 and £65.
-5. Set the prod host and `alert_email`, then:
+6. Set `workspace.host`, `alert_email` and `prod_service_principal` in `databricks.yml`.
+
+#### 3a. Key Vault-backed secret scope
+
+The API keys live in Azure Key Vault; the Databricks scope is only a pointer to it. Secret
+names must match `SECRET_KEYS` in `config.py`.
+
+1. **Create the vault** (Azure portal → Key vaults → Create): same resource group as the
+   workspace, a globally unique name (e.g. `kv-energy-lakehouse`), UK South, Standard tier,
+   **Azure role-based access control**, public network access on. If you restrict networking
+   later, tick "Allow trusted Microsoft services".
+2. **Let yourself write secrets**: vault → Access control (IAM) → Add role assignment →
+   **Key Vault Secrets Officer** → your user.
+3. **Let Databricks read them**: add **Key Vault Secrets User** for the **AzureDatabricks**
+   application (`2ff814a6-3304-4ab8-85cb-cd0e6f879c1d`). Every read from the scope goes
+   through this app, whoever runs the job.
+4. **Add the secrets** (vault → Secrets → Generate/Import, or the CLI):
    ```bash
-   databricks bundle deploy -t prod
-   databricks bundle run -t prod energy_daily
+   az keyvault secret set --vault-name kv-energy-lakehouse --name entsoe-token --value "<token>"
+   az keyvault secret set --vault-name kv-energy-lakehouse --name fred-api-key --value "<key>"
+   az keyvault secret set --vault-name kv-energy-lakehouse --name cds-api-key  --value "<key>"
    ```
-   Backfill history in chunks of up to 31 days (the `--max-days` guard), e.g. one month per run.
-6. **CI/CD**: add `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`
-   (service principal) as GitHub secrets. Pushes to `main` then test and deploy.
+5. From the vault's **Properties** page, copy the **Vault URI** and the **Resource ID**.
+6. **Create the scope** at `https://<workspace-url>#secrets/createScope` (case-sensitive;
+   it isn't in the menus): scope name `energy`, manage principal **All workspace users**,
+   DNS name = Vault URI, Resource ID = Resource ID.
+7. **Check it**:
+   ```bash
+   databricks secrets list-scopes          # energy, backend AZURE_KEYVAULT
+   databricks secrets list-secrets energy  # the three names
+   ```
+   The scope is read-only from Databricks (`put-secret` fails). Change keys in Key Vault;
+   Databricks sees new values immediately.
+
+#### 3b. Prod service principal
+
+1. **Create it**: workspace → your name → Settings → Identity and access → Service principals
+   → Add new. Name `energy-prod-sp`, **Databricks managed**, keep **Workspace access** (no
+   cluster creation needed; everything is serverless).
+2. Copy its **Application ID** into `prod_service_principal` in `databricks.yml`.
+3. **OAuth secret for CI**: service principal → Secrets → Generate secret, scope
+   **all-apis** (bundle deploys touch files, jobs, pipelines, Unity Catalog and secrets),
+   lifetime 730 days. It's shown once; set a reminder to rotate it.
+4. **Grant it the prod catalog only** (SQL editor):
+   ```sql
+   GRANT USE CATALOG, USE SCHEMA, CREATE SCHEMA, CREATE TABLE, CREATE MATERIALIZED VIEW,
+         SELECT, MODIFY, READ VOLUME, WRITE VOLUME
+   ON CATALOG energy TO `<application-id>`;
+   ```
+   Nothing on `energy_dev`, which keeps prod out of dev.
+5. **Secret scope**: nothing to do. "All workspace users" already covers it, and it needs no
+   Key Vault role because the AzureDatabricks app does the reading.
+6. **Let yourself deploy as it**: service principal → Permissions → Grant access → your user
+   → **Service principal: User** (workspace admins may already have this).
+7. **GitHub**: repo → Settings → Environments → New environment `prod` (optionally limit it
+   to the `main` branch and add yourself as a required reviewer). Add environment secrets
+   `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID` (the Application ID) and
+   `DATABRICKS_CLIENT_SECRET`. The deploy job in `ci.yml` uses `environment: prod`, so PR
+   runs can't read them.
+
+### 4. Dev
+```bash
+databricks auth login --host https://adb-<id>.<n>.azuredatabricks.net
+databricks bundle deploy -t dev
+databricks bundle run -t dev energy_daily    # ingest -> pipeline, rolling windows
+# Backfill a specific window (max 31 days per run, the --max-days guard):
+databricks bundle run -t dev energy_daily --params start=2026-10-01,end=2026-10-31
+```
+Schedules stay paused in dev, so it only costs money when you run something.
+
+### 5. Prod
+Pushes to `main` run the tests and then deploy prod as the service principal (step 3b.7).
+
+> **Tip:** let CI run the first prod deploy rather than running `bundle deploy -t prod` from
+> your laptop. CI signs in as the service principal, so the prod schemas and Volume end up
+> owned by it rather than by you.
+
+Once deployed, run or backfill it:
+```bash
+databricks bundle run -t prod energy_daily
+databricks bundle run -t prod energy_daily --params start=2026-09-01,end=2026-09-30
+```
 
 ## Cost guardrails (target ≤ £75/month)
 
@@ -130,7 +195,7 @@ databricks bundle run -t dev energy_pipeline
 | Weekly ERA5 job | one CDS request per month touched, 90-min timeout | 2–5 |
 | SQL warehouse | 2X-Small, serverless, minimum auto-stop | ~20 (≈10 h use) |
 | Storage (ADLS) | a few GB | < 2 |
-| Dev | Free Edition | 0 |
+| Dev runs | same workspace, manual runs only, schedules paused | 3–8 |
 
 Never run the pipeline in continuous mode, and never leave a warehouse running. Check
 `sql/dashboard_and_cost_queries.sql` (queries 5 and 5b) weekly.
@@ -142,13 +207,13 @@ Already in the scaffold:
 - [x] Bundle: schemas, Volume, pipeline, two jobs, dev/prod targets
 - [x] Medallion pipeline with expectations and DQ table
 
-### Stage 1: Core build (Free Edition dev + Azure prod, ~£30–45/month)
+### Stage 1: Core build (one Azure workspace for dev + prod, ~£35–50/month)
 
 **Phase 0: Accounts and keys**
 - [ ] Request ENTSO-E API access (slowest, so start first)
 - [ ] FRED API key
 - [ ] Copernicus CDS account, API key, and the ERA5 licence accepted
-- [ ] Databricks Free Edition workspace
+- [ ] Azure Databricks workspace (Premium, serverless), catalogs `energy_dev` and `energy`
 - [ ] Azure budget with alerts at £40 and £65
 - [ ] Python 3.11, Git and the Databricks CLI installed locally
 
@@ -158,18 +223,18 @@ Already in the scaffold:
 **Phase 2: Local ingestion**
 - [ ] Run `ingest` for Elexon, then FRED, stocks and ENTSO-E into `./landing`, and inspect the payloads
 
-**Phase 3: Build on Free Edition**
-- [ ] `bundle deploy -t dev`, upload landing files to the dev Volume, run the pipeline
+**Phase 3: Build in dev**
+- [ ] `bundle deploy -t dev`, `bundle run -t dev energy_daily`
 - [ ] Fix any schema mismatches (e.g. Elexon field names in `silver.py`)
 - [ ] Gold tables queryable and expectations green
 
-**Phase 4: Azure prod**
-- [ ] Premium tier and serverless confirmed, `energy` catalog created
+**Phase 4: Prod**
 - [ ] Key Vault secrets plus a Key Vault-backed scope `energy`
+- [ ] Prod service principal with grants on `energy` only
 - [ ] `bundle deploy -t prod`, one manual run of `energy_daily`, cost checked next day
 
 **Phase 5: Backfill**
-- [ ] Ingest locally a month at a time (2024 to today), upload to the prod Volume, then one pipeline run
+- [ ] Run `energy_daily` a month at a time with `--params start=...,end=...` (2024 to today)
 - [ ] ERA5 backfill last (slow CDS queue)
 
 **Phase 6: Dashboard**

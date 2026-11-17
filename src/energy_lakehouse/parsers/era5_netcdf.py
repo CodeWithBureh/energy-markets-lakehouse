@@ -35,6 +35,8 @@ def flatten_era5(nc_path: str | Path) -> pd.DataFrame:
     df = df.rename(columns={"valid_time": "valid_time_utc"})
     df["valid_time_utc"] = pd.to_datetime(df["valid_time_utc"], utc=True)
     cols = ["valid_time_utc", "latitude", "longitude", *present]
+    # ERA5 stores variables as float32; widen so bronze's DOUBLE schema always matches.
+    df[cols[1:]] = df[cols[1:]].astype("float64")
     return df[cols].sort_values(cols[:3]).reset_index(drop=True)
 
 

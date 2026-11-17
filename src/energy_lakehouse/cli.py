@@ -180,8 +180,9 @@ def run_era5(root: str, start: date, end: date, ts: str, scope: str | None) -> R
 
 # --- CLI ------------------------------------------------------------------------------
 
-def _parse_date(v: str) -> date:
-    return date.fromisoformat(v)
+def _parse_date(v: str) -> date | None:
+    # Jobs always pass --start={{job.parameters.start}}; blank means "use the default window".
+    return date.fromisoformat(v) if v.strip() else None
 
 
 def build_parser() -> argparse.ArgumentParser:

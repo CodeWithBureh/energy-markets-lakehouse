@@ -1,5 +1,5 @@
 # One Lakeflow Declarative Pipeline for bronze -> silver -> gold.
-# Free Edition allows one active pipeline per type, and one pipeline is cheaper anyway.
+# One pipeline keeps cost and scheduling simple.
 # Triggered (continuous: false): it runs when the job asks, then shuts down.
 
 resources:

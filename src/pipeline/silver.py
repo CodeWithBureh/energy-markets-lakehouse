@@ -115,7 +115,11 @@ def _fred_series():
 @dlt.expect("gbp_per_eur_plausible", "gbp_per_eur IS NULL OR gbp_per_eur BETWEEN 0.5 AND 1.5")
 def fx_rates_daily():
     s = _fred_series().filter(F.col("series_id").isin("DEXUSUK", "DEXUSEU"))
-    wide = s.groupBy("obs_date").pivot("series_id", ["DEXUSUK", "DEXUSEU"]).agg(F.first("value"))
+    # Conditional aggregation instead of pivot (unsupported in Lakeflow pipelines).
+    wide = s.groupBy("obs_date").agg(*[
+        F.first(F.when(F.col("series_id") == sid, F.col("value")), ignorenulls=True).alias(sid)
+        for sid in ("DEXUSUK", "DEXUSEU")
+    ])
     return wide.select(
         F.col("obs_date").alias("fx_date"),
         F.col("DEXUSUK").alias("usd_per_gbp"),

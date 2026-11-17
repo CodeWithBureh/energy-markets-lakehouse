@@ -1,16 +1,21 @@
 # Databricks Asset Bundle: GB energy markets lakehouse
-#   dev  -> Databricks Free Edition (build and test for £0)
-#   prod -> Azure Databricks (scheduled, serverless, budget-capped)
+# One Azure Databricks workspace hosts both targets, isolated by catalog:
+#   dev  -> catalog energy_dev, deployed as you, schemas prefixed dev_<you>_, schedules paused
+#   prod -> catalog energy, runs as a service principal, scheduled, budget-capped
 #
 #   databricks bundle validate -t dev
 #   databricks bundle deploy   -t dev
-#   databricks bundle run      -t dev energy_pipeline
+#   databricks bundle run      -t dev energy_daily
 
 bundle:
   name: energy-markets-lakehouse
 
 include:
   - resources/*.yml
+
+# Shared by both targets. e.g. https://adb-1234567890123456.7.azuredatabricks.net
+workspace:
+  host: https://adb-7405617375261646.6.azuredatabricks.net # https://adb-REPLACE-ME.azuredatabricks.net
 
 artifacts:
   energy_lakehouse:
@@ -26,34 +31,36 @@ variables:
     description: Unity Catalog catalog that holds raw/bronze/silver/gold
     default: energy
   secret_scope:
-    description: Databricks secret scope (Azure Key Vault-backed in prod)
+    description: Databricks secret scope (Azure Key Vault-backed)
     default: energy
   alert_email:
     description: Where job failure emails go
     default: you@example.com
   schedule_pause:
-    description: PAUSED in dev so Free Edition quota isn't burned by schedules
+    description: PAUSED in dev so schedules don't spend money while you build
     default: PAUSED
+  prod_service_principal:
+    description: Application (client) ID of the service principal prod jobs run as
+    default: 59f7fbbd-d629-4c33-b2f4-40fb76ed7a47
 
 targets:
   dev:
     mode: development
     default: true
-    workspace:
-      # Free Edition workspace URL, e.g. https://dbc-1234abcd-5678.cloud.databricks.com
-      host: https://REPLACE-ME-free-edition.cloud.databricks.com
     variables:
-      catalog: workspace        # Free Edition's default catalog
+      catalog: energy_dev
 
   prod:
     mode: production
     workspace:
-      # Azure Databricks workspace URL, e.g. https://adb-1234567890123456.7.azuredatabricks.net
-      host: https://adb-REPLACE-ME.azuredatabricks.net
       root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    # Prod jobs and the pipeline run as the service principal, not whoever deployed them,
+    # so they keep working if your user changes and can't touch energy_dev.
+    run_as:
+      service_principal_name: ${var.prod_service_principal}
     variables:
       catalog: energy
       schedule_pause: UNPAUSED
     permissions:
       - level: CAN_MANAGE
-        user_name: ${workspace.current_user.userName}
+        service_principal_name: ${var.prod_service_principal}
