@@ -1,0 +1,30 @@
+# Unity Catalog schemas and the landing Volume.
+# In development mode the bundle prefixes these (e.g. dev_yourname_bronze), so code
+# never hard-codes schema names. They're passed in through configuration instead.
+
+resources:
+  schemas:
+    raw:
+      catalog_name: ${var.catalog}
+      name: raw
+      comment: Landing zone (Volume) for untouched API payloads
+    bronze:
+      catalog_name: ${var.catalog}
+      name: bronze
+      comment: Append-only Auto Loader tables
+    silver:
+      catalog_name: ${var.catalog}
+      name: silver
+      comment: Cleaned, typed, deduplicated, UTC
+    gold:
+      catalog_name: ${var.catalog}
+      name: gold
+      comment: Star schema and marts for the dashboard
+
+  volumes:
+    landing:
+      catalog_name: ${var.catalog}
+      schema_name: ${resources.schemas.raw.name}
+      name: landing
+      volume_type: MANAGED
+      comment: Raw JSON / XML / NetCDF / Parquet files written by the ingest tasks

@@ -1,0 +1,59 @@
+# Databricks Asset Bundle: GB energy markets lakehouse
+#   dev  -> Databricks Free Edition (build and test for £0)
+#   prod -> Azure Databricks (scheduled, serverless, budget-capped)
+#
+#   databricks bundle validate -t dev
+#   databricks bundle deploy   -t dev
+#   databricks bundle run      -t dev energy_pipeline
+
+bundle:
+  name: energy-markets-lakehouse
+
+include:
+  - resources/*.yml
+
+artifacts:
+  energy_lakehouse:
+    type: whl
+    build: python -m build --wheel
+    path: .
+    # Serverless caches environments by wheel path/version; a dynamic version makes
+    # every deploy pick up new code.
+    dynamic_version: true
+
+variables:
+  catalog:
+    description: Unity Catalog catalog that holds raw/bronze/silver/gold
+    default: energy
+  secret_scope:
+    description: Databricks secret scope (Azure Key Vault-backed in prod)
+    default: energy
+  alert_email:
+    description: Where job failure emails go
+    default: you@example.com
+  schedule_pause:
+    description: PAUSED in dev so Free Edition quota isn't burned by schedules
+    default: PAUSED
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      # Free Edition workspace URL, e.g. https://dbc-1234abcd-5678.cloud.databricks.com
+      host: https://REPLACE-ME-free-edition.cloud.databricks.com
+    variables:
+      catalog: workspace        # Free Edition's default catalog
+
+  prod:
+    mode: production
+    workspace:
+      # Azure Databricks workspace URL, e.g. https://adb-1234567890123456.7.azuredatabricks.net
+      host: https://adb-REPLACE-ME.azuredatabricks.net
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: energy
+      schedule_pause: UNPAUSED
+    permissions:
+      - level: CAN_MANAGE
+        user_name: ${workspace.current_user.userName}

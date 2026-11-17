@@ -1,0 +1,124 @@
+# Two scheduled jobs, both on serverless compute.
+#  - energy_daily:  ingest Elexon / ENTSO-E / FRED / stocks, then refresh the pipeline
+#  - energy_weekly_weather: pull a week of ERA5 (CDS queues can be slow, so weekly keeps
+#    the billed waiting time down)
+#
+# Cost guards: per-task timeouts, limited retries, one run at a time, and job-level timeouts.
+
+resources:
+  jobs:
+    energy_daily:
+      name: energy-daily
+      max_concurrent_runs: 1
+      timeout_seconds: 3600
+      schedule:
+        quartz_cron_expression: "0 40 7 * * ?"     # 07:40 UK time
+        timezone_id: Europe/London
+        pause_status: ${var.schedule_pause}
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+      tags:
+        project: energy-markets-lakehouse
+      environments:
+        - environment_key: ingest
+          spec:
+            environment_version: "2"
+            dependencies:
+              - ../dist/*.whl
+
+      tasks:
+        - task_key: ingest_elexon
+          environment_key: ingest
+          timeout_seconds: 900
+          max_retries: 2
+          min_retry_interval_millis: 120000
+          python_wheel_task:
+            package_name: energy_lakehouse
+            entry_point: ingest
+            parameters:
+              - --source=elexon
+              - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
+
+        - task_key: ingest_entsoe
+          environment_key: ingest
+          timeout_seconds: 900
+          max_retries: 2
+          min_retry_interval_millis: 120000
+          python_wheel_task:
+            package_name: energy_lakehouse
+            entry_point: ingest
+            parameters:
+              - --source=entsoe
+              - --secret-scope=${var.secret_scope}
+              - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
+
+        - task_key: ingest_fred
+          environment_key: ingest
+          timeout_seconds: 600
+          max_retries: 2
+          min_retry_interval_millis: 120000
+          python_wheel_task:
+            package_name: energy_lakehouse
+            entry_point: ingest
+            parameters:
+              - --source=fred
+              - --secret-scope=${var.secret_scope}
+              - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
+
+        - task_key: ingest_stocks
+          environment_key: ingest
+          timeout_seconds: 600
+          max_retries: 2
+          min_retry_interval_millis: 120000
+          python_wheel_task:
+            package_name: energy_lakehouse
+            entry_point: ingest
+            parameters:
+              - --source=stocks
+              - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
+
+        - task_key: refresh_pipeline
+          # One flaky source shouldn't stop the others from flowing through.
+          run_if: AT_LEAST_ONE_SUCCESS
+          depends_on:
+            - task_key: ingest_elexon
+            - task_key: ingest_entsoe
+            - task_key: ingest_fred
+            - task_key: ingest_stocks
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.energy_pipeline.id}
+            full_refresh: false
+
+    energy_weekly_weather:
+      name: energy-weekly-weather
+      max_concurrent_runs: 1
+      timeout_seconds: 7200
+      schedule:
+        quartz_cron_expression: "0 15 5 ? * MON"   # Mondays 05:15 UK time
+        timezone_id: Europe/London
+        pause_status: ${var.schedule_pause}
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+      tags:
+        project: energy-markets-lakehouse
+      environments:
+        - environment_key: ingest
+          spec:
+            environment_version: "2"
+            dependencies:
+              - ../dist/*.whl
+      tasks:
+        - task_key: ingest_era5
+          environment_key: ingest
+          timeout_seconds: 5400
+          max_retries: 1
+          python_wheel_task:
+            package_name: energy_lakehouse
+            entry_point: ingest
+            parameters:
+              - --source=era5
+              - --secret-scope=${var.secret_scope}
+              - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
+        # No pipeline refresh here: the next daily run picks the new weather files up.

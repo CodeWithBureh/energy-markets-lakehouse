@@ -1,0 +1,25 @@
+# One Lakeflow Declarative Pipeline for bronze -> silver -> gold.
+# Free Edition allows one active pipeline per type, and one pipeline is cheaper anyway.
+# Triggered (continuous: false): it runs when the job asks, then shuts down.
+
+resources:
+  pipelines:
+    energy_pipeline:
+      name: energy-medallion
+      catalog: ${var.catalog}
+      schema: ${resources.schemas.silver.name}     # default; tables use explicit schemas
+      serverless: true
+      continuous: false
+      channel: CURRENT
+      configuration:
+        energy.landing_root: /Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
+        energy.bronze_schema: ${resources.schemas.bronze.name}
+        energy.silver_schema: ${resources.schemas.silver.name}
+        energy.gold_schema: ${resources.schemas.gold.name}
+      libraries:
+        - file:
+            path: ../src/pipeline/bronze.py
+        - file:
+            path: ../src/pipeline/silver.py
+        - file:
+            path: ../src/pipeline/gold.py
