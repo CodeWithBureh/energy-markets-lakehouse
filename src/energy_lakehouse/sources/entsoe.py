@@ -24,14 +24,18 @@ def delivery_day_bounds(d: date) -> tuple[str, str]:
 
 
 def fetch_day_ahead_prices(
-    session: requests.Session, token: str, zone_eic: str, delivery_date: date
+    session: requests.Session, token: str, zone_eic: str, first_day: date, last_day: date
 ) -> bytes:
-    """Raw XML for one zone and one delivery day.
+    """Raw XML for one zone, covering delivery days ``first_day``..``last_day`` inclusive.
+
+    One request per window, not per day: ENTSO-E takes 5-15 s per call whatever the range
+    (up to a year), so per-day calls made a month's backfill run for 20-40 minutes.
 
     ENTSO-E answers "no data yet" with an Acknowledgement_MarketDocument, sometimes
     as HTTP 200 and sometimes as 400. Both come back as bytes; the parser handles them.
     """
-    period_start, period_end = delivery_day_bounds(delivery_date)
+    period_start, _ = delivery_day_bounds(first_day)
+    _, period_end = delivery_day_bounds(last_day)
     resp = session.get(
         BASE_URL,
         params={

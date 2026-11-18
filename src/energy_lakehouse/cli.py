@@ -17,6 +17,8 @@ import json
 import logging
 import sys
 import tempfile
+import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -26,7 +28,7 @@ from energy_lakehouse.credentials import get_secret
 from energy_lakehouse.http_client import make_session
 from energy_lakehouse.landing import land_bytes, run_timestamp
 from energy_lakehouse.parsers import entsoe_xml
-from energy_lakehouse.timeutils import daterange, today_london
+from energy_lakehouse.timeutils import BRUSSELS, daterange, parse_iso_utc, today_london
 
 log = logging.getLogger("energy_lakehouse")
 
@@ -76,11 +78,18 @@ def run_elexon(root: str, start: date, end: date, ts: str) -> RunReport:
             ("system_prices", elexon.fetch_system_prices),
             ("generation_by_fuel", elexon.fetch_generation_by_fuel),
         ):
+            t0 = time.monotonic()
             try:
                 body = fn(s, d)
-                rep.rows_hint += len(json.loads(body)["data"])
+                n = len(json.loads(body)["data"])
+                rep.rows_hint += n
                 rep.files.append(str(land_bytes(root, "elexon", dataset, d, body, "json", ts)))
+                log.info("Elexon %s %s: %d rows in %.1fs", dataset, d, n, time.monotonic() - t0)
+                if n == 0:
+                    log.warning("Elexon %s %s returned no rows", dataset, d)
             except Exception as exc:  # noqa: BLE001
+                log.warning("Elexon %s %s failed after %.1fs: %s", dataset, d,
+                            time.monotonic() - t0, exc)
                 rep.errors.append(f"{dataset} {d}: {exc}")
     return rep
 
@@ -91,25 +100,39 @@ def run_entsoe(root: str, start: date, end: date, ts: str, scope: str | None) ->
     rep = RunReport("entsoe")
     token = get_secret("entsoe", scope)
     s = make_session()
-    for d in daterange(start, end):
-        for zone, eic in config.ENTSOE_ZONES.items():
-            try:
-                xml = entsoe.fetch_day_ahead_prices(s, token, eic, d)
-                # Keep the untouched XML as the immutable archive...
-                land_bytes(root, "entsoe", "day_ahead_xml", d, xml, "xml", f"{ts}_{zone}")
-                rows = entsoe_xml.parse_day_ahead(xml, zone)
-                if not rows:
-                    log.info("ENTSO-E %s %s: no data (%s)", zone, d,
-                             entsoe_xml.acknowledgement_reason(xml))
+    for zone, eic in config.ENTSOE_ZONES.items():
+        t0 = time.monotonic()
+        try:
+            # One request per zone for the whole window (see fetch_day_ahead_prices).
+            xml = entsoe.fetch_day_ahead_prices(s, token, eic, start, end)
+            # Keep the untouched XML as the immutable archive...
+            land_bytes(root, "entsoe", "day_ahead_xml", start, xml, "xml", f"{ts}_{zone}")
+            rows = entsoe_xml.parse_day_ahead(xml, zone)
+            log.info("ENTSO-E %s %s..%s: %d rows in %.1fs (%d KB)", zone, start, end,
+                     len(rows), time.monotonic() - t0, len(xml) // 1024)
+            if not rows:
+                log.warning("ENTSO-E %s %s..%s: no data (%s)", zone, start, end,
+                            entsoe_xml.acknowledgement_reason(xml))
+                continue
+            # ...and land the parsed rows as JSON lines, one file per CET/CEST delivery day,
+            # so Auto Loader and silver see the same layout as before.
+            by_day: dict[date, list[dict]] = defaultdict(list)
+            for r in rows:
+                day = parse_iso_utc(r["delivery_start_utc"]).astimezone(BRUSSELS).date()
+                by_day[day].append(r)
+            for day in daterange(start, end):
+                if day not in by_day:
+                    log.warning("ENTSO-E %s %s: missing from the response", zone, day)
                     continue
-                # ...and land the parsed rows as JSON lines for Auto Loader.
-                payload = ("\n".join(json.dumps(r) for r in rows) + "\n").encode()
-                path = land_bytes(root, "entsoe", "day_ahead", d, payload, "jsonl",
+                payload = ("\n".join(json.dumps(r) for r in by_day[day]) + "\n").encode()
+                path = land_bytes(root, "entsoe", "day_ahead", day, payload, "jsonl",
                                   f"{ts}_{zone}")
                 rep.files.append(str(path))
-                rep.rows_hint += len(rows)
-            except Exception as exc:  # noqa: BLE001
-                rep.errors.append(f"{zone} {d}: {exc}")
+                rep.rows_hint += len(by_day[day])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ENTSO-E %s %s..%s failed after %.1fs: %s", zone, start, end,
+                        time.monotonic() - t0, exc)
+            rep.errors.append(f"{zone} {start}..{end}: {exc}")
     return rep
 
 
@@ -120,14 +143,19 @@ def run_fred(root: str, start: date, end: date, ts: str, scope: str | None) -> R
     key = get_secret("fred", scope)
     s = make_session()
     for series_id in config.FRED_SERIES:
+        t0 = time.monotonic()
         try:
             body = fred.fetch_observations(s, key, series_id, start, end)
-            rep.rows_hint += len(json.loads(body).get("observations", []))
+            n = len(json.loads(body).get("observations", []))
+            rep.rows_hint += n
+            log.info("FRED %s %s..%s: %d observations in %.1fs", series_id, start, end, n,
+                     time.monotonic() - t0)
             rep.files.append(
                 str(land_bytes(root, "fred", "observations", end, body, "json",
                                f"{ts}_{series_id}"))
             )
         except Exception as exc:  # noqa: BLE001
+            log.warning("FRED %s failed after %.1fs: %s", series_id, time.monotonic() - t0, exc)
             rep.errors.append(f"{series_id}: {exc}")
     return rep
 
@@ -137,17 +165,24 @@ def run_stocks(root: str, start: date, end: date, ts: str) -> RunReport:
 
     rep = RunReport("stocks")
     for ticker in config.STOCKS:
+        t0 = time.monotonic()
         try:
             body = stocks.fetch_daily_prices(ticker, start, end)
+            n = body.count(b"\n")
+            log.info("Stocks %s %s..%s: %d trading days in %.1fs", ticker, start, end, n,
+                     time.monotonic() - t0)
             if not body:
+                # Normal for a weekend/holiday window; worth a look if it persists.
+                log.warning("Stocks %s %s..%s: no rows", ticker, start, end)
                 continue
-            rep.rows_hint += body.count(b"\n")
+            rep.rows_hint += n
             safe = ticker.replace(".", "_")
             rep.files.append(
                 str(land_bytes(root, "stocks", "daily_prices", end, body, "jsonl",
                                f"{ts}_{safe}"))
             )
         except Exception as exc:  # noqa: BLE001
+            log.warning("Stocks %s failed after %.1fs: %s", ticker, time.monotonic() - t0, exc)
             rep.errors.append(f"{ticker}: {exc}")
     return rep
 
@@ -162,6 +197,9 @@ def run_era5(root: str, start: date, end: date, ts: str, scope: str | None) -> R
     with tempfile.TemporaryDirectory() as tmp:
         for (year, month), group in era5.group_by_month(days).items():
             label = f"{year:04d}-{month:02d}"
+            t0 = time.monotonic()
+            log.info("ERA5 %s: requesting %d day(s); the CDS queue can take a while",
+                     label, len(group))
             try:
                 nc = Path(tmp) / f"era5_gb_{label}.nc"
                 era5.fetch_month(key, year, month, [d.day for d in group], nc)
@@ -169,11 +207,13 @@ def run_era5(root: str, start: date, end: date, ts: str, scope: str | None) -> R
                 land_bytes(root, "era5", "gb_hourly_netcdf", anchor, nc.read_bytes(), "nc", ts)
                 df = flatten_era5(nc)
                 rep.rows_hint += len(df)
+                log.info("ERA5 %s: %d grid rows in %.1fs", label, len(df), time.monotonic() - t0)
                 rep.files.append(
                     str(land_bytes(root, "era5", "gb_hourly", anchor,
                                    to_parquet_bytes(df), "parquet", ts))
                 )
             except Exception as exc:  # noqa: BLE001
+                log.warning("ERA5 %s failed after %.1fs: %s", label, time.monotonic() - t0, exc)
                 rep.errors.append(f"{label}: {exc}")
     return rep
 
@@ -217,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
 
     ts = run_timestamp()
     root = args.landing_root
-    log.info("Ingesting %s for %s..%s into %s", args.source, start, end, root)
+    log.info("Ingesting %s for %s..%s (%d days) into %s", args.source, start, end, span, root)
+    t0 = time.monotonic()
 
     if args.source == "elexon":
         rep = run_elexon(root, start, end, ts)
@@ -230,7 +271,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         rep = run_era5(root, start, end, ts, args.secret_scope)
 
-    print(json.dumps(rep.summary(), indent=2))
+    elapsed = time.monotonic() - t0
+    log.info("Finished %s in %.1fs: %d files, ~%d rows, %d errors", args.source, elapsed,
+             len(rep.files), rep.rows_hint, len(rep.errors))
+    for err in rep.errors:
+        log.error("%s: %s", args.source, err)
+    print(json.dumps({**rep.summary(), "elapsed_seconds": round(elapsed, 1)}, indent=2))
     if rep.errors and not args.allow_partial:
         # Fail the task (so retries/alerts fire) only if *nothing* landed. A single
         # missing zone or ticker shouldn't block the whole pipeline.

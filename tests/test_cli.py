@@ -25,3 +25,29 @@ def test_blank_job_parameters_fall_back_to_default_window():
     args = build_parser().parse_args(["--source", "elexon", "--landing-root", "x",
                                       "--start=2026-10-01", "--end=2026-10-31"])
     assert args.start == date(2026, 10, 1) and args.end == date(2026, 10, 31)
+
+
+def test_entsoe_fetches_once_per_zone_and_lands_one_file_per_day(tmp_path, monkeypatch, caplog):
+    from pathlib import Path
+
+    from energy_lakehouse import cli, config
+    from energy_lakehouse.sources import entsoe
+
+    xml = (Path(__file__).parent / "fixtures" / "entsoe_a44_sample.xml").read_bytes()
+    calls = []
+
+    def fake_fetch(session, token, eic, first_day, last_day):
+        calls.append((eic, first_day, last_day))
+        return xml
+
+    monkeypatch.setattr(entsoe, "fetch_day_ahead_prices", fake_fetch)
+    monkeypatch.setattr(cli, "get_secret", lambda source, scope: "token")
+    monkeypatch.setattr(config, "ENTSOE_ZONES", {"FR": "10YFR-RTE------C"})
+
+    # The fixture covers delivery day 12 Nov (CET), which starts at 23:00 UTC on the 11th.
+    rep = cli.run_entsoe(str(tmp_path), date(2026, 11, 11), date(2026, 11, 12), "ts", None)
+
+    assert calls == [("10YFR-RTE------C", date(2026, 11, 11), date(2026, 11, 12))]
+    assert [Path(f).parent.name for f in rep.files] == ["12"]   # .../2026/11/12/
+    assert not rep.errors
+    assert "ENTSO-E FR 2026-11-11: missing from the response" in caplog.text
