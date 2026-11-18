@@ -2,13 +2,20 @@
 # ---------------------------------------------------------------------------------------
 # Clean, typed, deduplicated tables, all with UTC timestamps.
 #
-# Incremental upserts with AUTO CDC (Lakeflow's managed MERGE):
+# Incremental, change-only merges with AUTO CDC (Lakeflow's managed MERGE), SCD type 2:
 #   bronze (append-only) --stream--> typed source view --AUTO CDC--> silver streaming table
-# Each update reads only bronze rows that arrived since the last run, then merges them on
-# the business key. A row is written only when its sequence value is newer than what silver
-# already holds, so stale re-deliveries and out-of-order files are ignored, and settlement
-# revisions overwrite earlier values. Re-landing an identical record leaves the values as
-# they were.
+# Each update reads only bronze rows that arrived since the last run and merges them on the
+# business key, comparing the *data* columns only:
+#   * same values re-landed in a newer file -> nothing is written
+#   * any data value changed               -> the old version is closed (__END_AT set) and
+#                                             the new one becomes current (__END_AT NULL)
+#   * an older/out-of-order file           -> ignored
+# Lineage columns (_file_modified_at, _source_file, Elexon publish time) only order the
+# versions; they are not compared or stored. __START_AT keeps them for each version: it is
+# the sequence struct of the delivery that first brought those values.
+#
+# Current values: WHERE __END_AT IS NULL (gold's s() helper does this). Full revision
+# history, e.g. Elexon re-settlements, stays queryable for "as-of" analysis.
 #
 # Expectations sit on the source views, so bad rows are dropped before they reach the merge.
 # "expect" warns, "expect_or_drop" removes the row.
@@ -22,21 +29,33 @@ SILVER = spark.conf.get("energy.silver_schema")  # noqa: F821
 # Newest landed file wins. The file name carries the run timestamp, so it breaks ties
 # between files with the same modification time.
 LANDED_ORDER = F.struct("_file_modified_at", "_source_file")
+LINEAGE_COLUMNS = ["_file_modified_at", "_source_file"]
 
 
 def bronze_stream(table):
     return spark.readStream.table(f"{BRONZE}.{table}")  # noqa: F821
 
 
-def upsert(target, source, keys, sequence_by=LANDED_ORDER, comment=None, cluster_by=None):
-    """Silver streaming table kept current (SCD type 1) from ``source`` by AUTO CDC."""
+def current(table):
+    """Current version of every key in an SCD type 2 silver table."""
+    return spark.read.table(f"{SILVER}.{table}").filter("__END_AT IS NULL")  # noqa: F821
+
+
+def upsert(target, source, keys, sequence_by=LANDED_ORDER, metadata_columns=(),
+           comment=None, cluster_by=None):
+    """Silver SCD type 2 streaming table fed from ``source`` by AUTO CDC.
+
+    A new version is written only when a data column changes. Lineage and any
+    ``metadata_columns`` order the versions but are neither compared nor stored.
+    """
     dlt.create_streaming_table(name=f"{SILVER}.{target}", comment=comment, cluster_by=cluster_by)
     dlt.create_auto_cdc_flow(
         target=f"{SILVER}.{target}",
         source=source,
         keys=keys,
         sequence_by=sequence_by,
-        stored_as_scd_type=1,
+        except_column_list=[*LINEAGE_COLUMNS, *metadata_columns],
+        stored_as_scd_type=2,
     )
 
 
@@ -94,9 +113,12 @@ def gb_generation_by_fuel_updates():
 
 
 # Elexon's publish time says which version is newest; landing order only breaks ties.
+# A re-publish with identical generation figures isn't a change, so publish time is
+# metadata: it orders versions (and lives on in __START_AT) but isn't compared.
 upsert("gb_generation_by_fuel", "gb_generation_by_fuel_updates",
        keys=["settlement_date", "settlement_period", "fuel_type"],
        sequence_by=F.struct("publish_time_utc", "_file_modified_at", "_source_file"),
+       metadata_columns=["publish_time_utc"],
        comment="GB half-hourly generation outturn (MW) by fuel type, incl. interconnectors.")
 
 
@@ -151,7 +173,7 @@ upsert("fred_observations", "fred_observations_updates",
 
 # Small reshapes of fred_observations. Materialized views, refreshed from the merged table.
 def _fred_series():
-    return spark.read.table(f"{SILVER}.fred_observations")  # noqa: F821
+    return current("fred_observations")
 
 
 @dlt.table(name=f"{SILVER}.fx_rates_daily",

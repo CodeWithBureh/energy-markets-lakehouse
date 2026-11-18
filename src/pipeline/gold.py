@@ -13,7 +13,10 @@ GOLD = spark.conf.get("energy.gold_schema")  # noqa: F821
 
 
 def s(name):
-    return spark.read.table(f"{SILVER}.{name}")  # noqa: F821
+    """Current rows of a silver table. Merged silver tables are SCD type 2 and keep every
+    revision; only rows with __END_AT NULL are current."""
+    df = spark.read.table(f"{SILVER}.{name}")  # noqa: F821
+    return df.filter("__END_AT IS NULL") if "__END_AT" in df.columns else df
 
 
 def g(name):
