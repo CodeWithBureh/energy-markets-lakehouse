@@ -1,6 +1,9 @@
 # Unity Catalog schemas and the landing Volume.
 # In development mode the bundle prefixes these (e.g. dev_yourname_bronze), so code
 # never hard-codes schema names. They're passed in through configuration instead.
+#
+# Read-only grants go to a group, not a person. Bundle grants are authoritative: a deploy
+# resets each schema's grants to exactly this list (owners keep their implicit rights).
 
 resources:
   schemas:
@@ -12,14 +15,23 @@ resources:
       catalog_name: ${var.catalog}
       name: bronze
       comment: Append-only Auto Loader tables
+      grants:
+        - principal: ${var.readers_group}
+          privileges: [USE_SCHEMA, SELECT]
     silver:
       catalog_name: ${var.catalog}
       name: silver
       comment: Cleaned, typed, deduplicated, UTC
+      grants:
+        - principal: ${var.readers_group}
+          privileges: [USE_SCHEMA, SELECT]
     gold:
       catalog_name: ${var.catalog}
       name: gold
       comment: Star schema and marts for the dashboard
+      grants:
+        - principal: ${var.readers_group}
+          privileges: [USE_SCHEMA, SELECT]
 
   volumes:
     landing:

@@ -104,7 +104,12 @@ One workspace hosts both targets. They're kept apart by catalog: dev writes to
 4. **Service principal** for prod (see [3b](#3b-prod-service-principal)).
 5. **Budgets**: in Azure Cost Management, set a budget on the subscription/resource group
    with alerts at £40 and £65.
-6. Set `workspace.host`, `alert_email` and `prod_service_principal` in `databricks.yml`.
+6. **Readers group**: Settings → Identity and access → Groups → Add new, named
+   `energy-readers` (an account-level group; Unity Catalog can't grant to workspace-local
+   groups). Add yourself, then run `GRANT USE CATALOG ON CATALOG energy TO \`energy-readers\``.
+   The bundle grants the group `USE SCHEMA` + `SELECT` on bronze/silver/gold and view
+   access to the prod jobs and pipeline.
+7. Set `workspace.host`, `alert_email` and `prod_service_principal` in `databricks.yml`.
 
 #### 3a. Key Vault-backed secret scope
 

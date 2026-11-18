@@ -38,6 +38,9 @@ variables:
   schedule_pause:
     description: PAUSED in dev so schedules don't spend money while you build
     default: PAUSED
+  readers_group:
+    description: Account-level group given read-only access to bronze/silver/gold
+    default: energy-readers
   prod_service_principal:
     description: Application (client) ID of the service principal prod jobs run as
     default: 59f7fbbd-d629-4c33-b2f4-40fb76ed7a47
@@ -63,3 +66,5 @@ targets:
     permissions:
       - level: CAN_MANAGE
         service_principal_name: ${var.prod_service_principal}
+      - level: CAN_VIEW
+        group_name: ${var.readers_group}
