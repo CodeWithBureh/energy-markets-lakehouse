@@ -179,6 +179,14 @@ databricks bundle run -t dev energy_daily --params start=2026-10-01,end=2026-10-
 ```
 Schedules stay paused in dev, so it only costs money when you run something.
 
+**Backfilling many months**: set the target, job and months in `backfill.toml`, then
+```bash
+python scripts/backfill.py --dry-run   # show the plan
+python scripts/backfill.py             # run one month at a time; rerun to resume
+```
+It runs the job once per month, oldest first, and records progress in `.databricks/backfill/`,
+so a rerun skips months that succeeded and retries any that failed or partly failed.
+
 ### 5. Prod
 Pushes to `main` run the tests and then deploy prod as the service principal (step 3b.7).
 

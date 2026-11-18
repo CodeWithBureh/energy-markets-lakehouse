@@ -1,0 +1,16 @@
+# Backfill plan for scripts/backfill.py: one job run per calendar month, oldest first.
+#
+#   python scripts/backfill.py --dry-run     # show the months it would run
+#   python scripts/backfill.py               # run them (resumes where it left off)
+#
+# Progress is kept in .databricks/backfill/<target>-<job>.json (gitignored), so a rerun
+# skips months that already succeeded and retries months that failed or partly failed.
+
+target = "prod"            # bundle target: "dev" or "prod"
+job = "energy_daily"       # Elexon, ENTSO-E, FRED, stocks. Use "energy_weekly_weather" for ERA5.
+
+start_month = "2024-01"
+end_month = "current"      # "current" = this month up to yesterday, or e.g. "2024-12"
+
+# To run specific months only, list them here; this overrides start_month/end_month.
+# months = ["2024-03", "2024-10"]
