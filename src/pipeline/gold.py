@@ -30,12 +30,18 @@ def _ffill(col):
 
 # --- Dimensions ------------------------------------------------------------------------
 
+# Skip-when-unchanged: gold views refresh as NO_OP only if their inputs haven't changed and
+# their plans are deterministic. A view built on current_date() or an in-memory list is
+# rewritten on every run, and that rewrite then looks like "changed data" to everything
+# downstream. So the dimensions below avoid both.
+
 @dlt.table(name=f"{GOLD}.dim_date",
-           comment="Calendar with the expected number of GB settlement periods per day.")
+           comment="Calendar 2020-2035 with the expected number of GB settlement periods per day.")
 def dim_date():
+    # A fixed range, not current_date(): deterministic, so this never needs recomputing.
+    # Facts inner-join to dates that have data, so the future dates are harmless.
     days = spark.sql(  # noqa: F821
-        "SELECT explode(sequence(DATE'2020-01-01', date_add(current_date(), 7), "
-        "INTERVAL 1 DAY)) AS date"
+        "SELECT explode(sequence(DATE'2020-01-01', DATE'2035-12-31', INTERVAL 1 DAY)) AS date"
     )
     midnight = lambda c: F.to_utc_timestamp(F.to_timestamp(c), "Europe/London")
     return days.select(
@@ -53,22 +59,37 @@ def dim_date():
 
 @dlt.table(name=f"{GOLD}.dim_company", comment="Energy companies tracked.")
 def dim_company():
-    rows = [
-        ("SSE.L", "SSE", "Generation & networks"),
-        ("CNA.L", "Centrica", "Supply & trading"),
-        ("NG.L", "National Grid", "Networks"),
-        ("DRX.L", "Drax", "Generation (biomass)"),
-        ("BP.L", "BP", "Oil & gas"),
-        ("SHEL.L", "Shell", "Oil & gas"),
-    ]
-    return spark.createDataFrame(rows, "ticker STRING, company STRING, segment STRING")  # noqa: F821
+    # SQL VALUES rather than createDataFrame: an in-memory DataFrame isn't a Delta input,
+    # so it was recomputed (and rewritten) on every run.
+    return spark.sql(  # noqa: F821
+        """
+        SELECT * FROM VALUES
+            ('SSE.L',  'SSE',           'Generation & networks'),
+            ('CNA.L',  'Centrica',      'Supply & trading'),
+            ('NG.L',   'National Grid', 'Networks'),
+            ('DRX.L',  'Drax',          'Generation (biomass)'),
+            ('BP.L',   'BP',            'Oil & gas'),
+            ('SHEL.L', 'Shell',         'Oil & gas')
+        AS t(ticker, company, segment)
+        """
+    )
 
 
 @dlt.table(name=f"{GOLD}.dim_fx_daily",
            comment="Daily FX with weekends/holidays forward-filled from the last published rate.")
 def dim_fx_daily():
     fx = s("fx_rates_daily").withColumnRenamed("fx_date", "date")
-    joined = g("dim_date").select("date").join(fx, "date", "left")
+    # Forward-fill up to the latest day with power prices (FRED lags by a few days), not
+    # to "today", so the view only changes when the data does.
+    last_day = (
+        s("gb_system_prices").select(F.max("settlement_date").alias("d"))
+        .unionByName(s("eu_day_ahead_prices").select(
+            F.max(F.to_date(F.from_utc_timestamp("delivery_start_utc", "Europe/Brussels"))).alias("d")))
+        .agg(F.max("d").alias("last_day"))
+    )
+    spine = (g("dim_date").select("date").crossJoin(last_day)
+             .filter(F.col("date") <= F.col("last_day")).drop("last_day"))
+    joined = spine.join(fx, "date", "left")
     return joined.select(
         "date",
         _ffill("usd_per_gbp").alias("usd_per_gbp"),
@@ -246,8 +267,11 @@ def mart_stocks_vs_market():
 def dq_settlement_period_completeness():
     loaded = s("gb_system_prices").groupBy(F.col("settlement_date").alias("date")).agg(
         F.countDistinct("settlement_period").alias("periods_loaded"))
+    # No current_date() filter (it made this view recompute every run). Scheduled ingests
+    # stop at yesterday, so a partial "today" only appears if a backfill ends on today, and
+    # then flagging it as incomplete is accurate.
     return (
-        g("dim_date").filter(F.col("date") < F.current_date())
+        g("dim_date")
         .join(loaded, "date", "inner")
         .filter(F.col("periods_loaded") != F.col("expected_settlement_periods"))
         .select("date", "expected_settlement_periods", "periods_loaded")
