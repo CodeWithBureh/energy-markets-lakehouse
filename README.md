@@ -179,13 +179,19 @@ databricks bundle run -t dev energy_daily --params start=2026-10-01,end=2026-10-
 ```
 Schedules stay paused in dev, so it only costs money when you run something.
 
-**Backfilling many months**: set the target, job and months in `backfill.toml`, then
+**Backfilling many months** uses the on-demand `energy_backfill` job. Each source loops over
+the months inside Databricks (one month per iteration) and the pipeline refreshes once at the
+end. Set the target and months in `backfill.toml`, then:
 ```bash
 python scripts/backfill.py --dry-run   # show the plan
-python scripts/backfill.py             # run one month at a time; rerun to resume
+python scripts/backfill.py             # start the job and wait for it
 ```
-It runs the job once per month, oldest first, and records progress in `.databricks/backfill/`,
-so a rerun skips months that succeeded and retries any that failed or partly failed.
+or call the job directly:
+```bash
+databricks bundle run -t prod energy_backfill --params start_month=2024-01,end_month=current
+databricks bundle run -t prod energy_backfill --params "months=2024-03 2024-10,include_weather=true"
+```
+If some months fail, open the run and click **Repair run**: only the failed months rerun.
 
 ### 5. Prod
 Pushes to `main` run the tests and then deploy prod as the service principal (step 3b.7).
@@ -247,7 +253,7 @@ Already in the scaffold:
 - [ ] `bundle deploy -t prod`, one manual run of `energy_daily`, cost checked next day
 
 **Phase 5: Backfill**
-- [ ] Run `energy_daily` a month at a time with `--params start=...,end=...` (2024 to today)
+- [ ] `python scripts/backfill.py` (energy_backfill job, Jan 2024 to today)
 - [ ] ERA5 backfill last (slow CDS queue)
 
 **Phase 6: Dashboard**
