@@ -17,3 +17,5 @@ end_month = "current"      # "current" = this month up to yesterday, or e.g. "20
 
 # ERA5 weather too? Slow: the Copernicus queue can take up to an hour per month.
 include_weather = false
+# ERA5 only, skipping Elexon / ENTSO-E / FRED / stocks (overrides include_weather).
+weather_only = false

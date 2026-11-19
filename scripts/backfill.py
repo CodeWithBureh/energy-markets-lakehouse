@@ -37,6 +37,7 @@ def job_params(cfg: dict) -> str:
         "end_month": cfg.get("end_month", "current"),
         "months": " ".join(cfg.get("months", [])),
         "include_weather": "true" if cfg.get("include_weather") else "false",
+        "weather_only": "true" if cfg.get("weather_only") else "false",
     }
     return ",".join(f"{k}={v}" for k, v in params.items())
 
@@ -52,7 +53,10 @@ def main(argv: list[str] | None = None) -> int:
     target = cfg.get("target", "dev")
     windows = month_windows(cfg.get("start_month"), cfg.get("end_month", "current"),
                             cfg.get("months"))
-    sources = "Elexon, ENTSO-E, FRED, stocks" + (", ERA5" if cfg.get("include_weather") else "")
+    if cfg.get("weather_only"):
+        sources = "ERA5 only"
+    else:
+        sources = "Elexon, ENTSO-E, FRED, stocks" + (", ERA5" if cfg.get("include_weather") else "")
     print(f"energy_backfill on {target}: {len(windows)} month(s) of {sources}")
     for s, e in windows:
         print(f"  {s:%Y-%m}  {s} .. {e}")

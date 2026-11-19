@@ -51,3 +51,22 @@ def test_entsoe_fetches_once_per_zone_and_lands_one_file_per_day(tmp_path, monke
     assert [Path(f).parent.name for f in rep.files] == ["12"]   # .../2026/11/12/
     assert not rep.errors
     assert "ENTSO-E FR 2026-11-11: missing from the response" in caplog.text
+
+
+def test_era5_end_is_clipped_to_the_publication_lag(tmp_path, monkeypatch):
+    from energy_lakehouse import cli
+
+    seen = []
+    monkeypatch.setattr(cli, "today_london", lambda: date(2026, 11, 19))
+    monkeypatch.setattr(cli, "run_era5", lambda root, start, end, ts, scope:
+                        seen.append((start, end)) or cli.RunReport("era5"))
+
+    # Backfill of the current month: stop 6 days back instead of asking for unpublished days.
+    assert main(["--source=era5", f"--landing-root={tmp_path}",
+                 "--start=2026-11-01", "--end=2026-11-18"]) == 0
+    assert seen == [(date(2026, 11, 1), date(2026, 11, 13))]
+
+    # Nothing published yet for the window: succeed without calling CDS.
+    assert main(["--source=era5", f"--landing-root={tmp_path}",
+                 "--start=2026-11-15", "--end=2026-11-18"]) == 0
+    assert len(seen) == 1

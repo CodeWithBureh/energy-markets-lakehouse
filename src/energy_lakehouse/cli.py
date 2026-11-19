@@ -249,6 +249,18 @@ def main(argv: list[str] | None = None) -> int:
     start, end = default_window(args.source, today_london())
     start = args.start or start
     end = args.end or end
+    if args.source == "era5":
+        # CDS hasn't published the last few days yet, and asking for them fails the whole
+        # month's request. Stop at the same lag the rolling window uses.
+        latest = today_london() - timedelta(days=config.ERA5_LATENCY_DAYS)
+        if end > latest:
+            log.info("ERA5 is published ~%d days behind; clipping end %s to %s",
+                     config.ERA5_LATENCY_DAYS, end, latest)
+            end = latest
+        if start > end:
+            log.info("ERA5: nothing published yet for %s onwards; skipping", start)
+            print(json.dumps({**RunReport("era5").summary(), "elapsed_seconds": 0.0}, indent=2))
+            return 0
     span = (end - start).days + 1
     if span > args.max_days:
         log.error("Window %s..%s is %d days (> --max-days %d). Backfill in smaller chunks.",

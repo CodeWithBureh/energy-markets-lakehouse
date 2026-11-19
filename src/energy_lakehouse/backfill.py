@@ -7,6 +7,10 @@ and the pipeline refreshes once at the end.
 
     plan_backfill --start-month 2024-01 --end-month current
     plan_backfill --months "2024-03 2024-10"
+    plan_backfill --start-month 2024-01 --weather-only true
+
+It also publishes ``run_markets`` and ``run_weather`` ("true"/"false"), which the job's
+condition tasks check to skip the market sources or ERA5.
 """
 
 from __future__ import annotations
@@ -61,6 +65,19 @@ def month_windows(
     return windows
 
 
+def is_true(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("true", "1", "yes")
+
+
+def source_flags(include_weather: str = "", weather_only: str = "") -> dict[str, str]:
+    """Which halves of the backfill run. weather_only implies ERA5 and skips the market
+    sources (Elexon, ENTSO-E, FRED, stocks)."""
+    only = is_true(weather_only)
+    weather = only or is_true(include_weather)
+    return {"run_markets": "false" if only else "true",
+            "run_weather": "true" if weather else "false"}
+
+
 def plan_main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     p = argparse.ArgumentParser(prog="plan_backfill", description=__doc__,
@@ -69,7 +86,11 @@ def plan_main(argv: list[str] | None = None) -> int:
     p.add_argument("--end-month", default="current")
     p.add_argument("--months", default="",
                    help='explicit months, space- or semicolon-separated: "2024-03 2024-10"')
+    p.add_argument("--include-weather", default="false", help="also backfill ERA5")
+    p.add_argument("--weather-only", default="false",
+                   help="backfill ERA5 only, skipping the market sources")
     args = p.parse_args(argv)
+    flags = source_flags(args.include_weather, args.weather_only)
 
     listed = [m for m in args.months.replace(";", " ").split() if m]
     windows = month_windows(args.start_month or None, args.end_month or "current", listed)
@@ -78,7 +99,8 @@ def plan_main(argv: list[str] | None = None) -> int:
         return 2
 
     plan = [{"start": s.isoformat(), "end": e.isoformat()} for s, e in windows]
-    log.info("Backfill plan: %d month(s), %s .. %s", len(plan), plan[0]["start"], plan[-1]["end"])
+    log.info("Backfill plan: %d month(s), %s .. %s; markets=%s weather=%s", len(plan),
+             plan[0]["start"], plan[-1]["end"], flags["run_markets"], flags["run_weather"])
     print(json.dumps(plan))
 
     if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
@@ -87,6 +109,8 @@ def plan_main(argv: list[str] | None = None) -> int:
         from databricks.sdk.runtime import dbutils
 
         dbutils.jobs.taskValues.set(key="months", value=plan)
+        for key, value in flags.items():
+            dbutils.jobs.taskValues.set(key=key, value=value)
     return 0
 
 

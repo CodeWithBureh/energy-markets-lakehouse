@@ -3,7 +3,7 @@ import json
 from datetime import date
 from pathlib import Path
 
-from energy_lakehouse.backfill import month_windows, plan_main
+from energy_lakehouse.backfill import month_windows, plan_main, source_flags
 from energy_lakehouse.config import DEFAULT_MAX_DAYS_PER_RUN
 
 TODAY = date(2026, 11, 18)
@@ -52,4 +52,13 @@ def test_script_builds_job_params():
     spec.loader.exec_module(script)
     assert script.job_params({"start_month": "2024-01", "months": ["2024-03", "2024-10"],
                               "include_weather": True}) == (
-        "start_month=2024-01,end_month=current,months=2024-03 2024-10,include_weather=true")
+        "start_month=2024-01,end_month=current,months=2024-03 2024-10,include_weather=true,"
+        "weather_only=false")
+
+
+def test_source_flags():
+    # Blank job parameters (the CLI default) mean markets only.
+    assert source_flags("", "") == {"run_markets": "true", "run_weather": "false"}
+    assert source_flags("true", "false") == {"run_markets": "true", "run_weather": "true"}
+    # weather_only implies ERA5 even when include_weather is off.
+    assert source_flags("false", "TRUE") == {"run_markets": "false", "run_weather": "true"}

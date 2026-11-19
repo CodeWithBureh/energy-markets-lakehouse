@@ -190,7 +190,10 @@ or call the job directly:
 ```bash
 databricks bundle run -t prod energy_backfill --params start_month=2024-01,end_month=current
 databricks bundle run -t prod energy_backfill --params "months=2024-03 2024-10,include_weather=true"
+databricks bundle run -t prod energy_backfill --params start_month=2024-01,end_month=current,weather_only=true
 ```
+`weather_only=true` backfills ERA5 alone and skips the market sources (Elexon, ENTSO-E, FRED,
+stocks). Expect it to be slow: the Copernicus queue can take up to an hour per month.
 If some months fail, open the run and click **Repair run**: only the failed months rerun.
 
 ### 5. Prod

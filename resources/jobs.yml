@@ -155,6 +155,7 @@ resources:
     #   databricks bundle run -t prod energy_backfill --params start_month=2024-01,end_month=current
     #   databricks bundle run -t prod energy_backfill --params "months=2024-03 2024-10"
     #   ...add include_weather=true for ERA5 (slow: the CDS queue can take an hour a month)
+    #   ...or weather_only=true for ERA5 alone (skips Elexon, ENTSO-E, FRED and stocks)
     #
     # If some months fail, use "Repair run" in the Jobs UI: it reruns only the failed
     # iterations, then the pipeline refresh.
@@ -176,6 +177,8 @@ resources:
           default: ""
         - name: include_weather
           default: "false"
+        - name: weather_only                       # ERA5 only; implies include_weather
+          default: "false"
       environments:
         - environment_key: ingest
           spec:
@@ -194,12 +197,25 @@ resources:
               - --start-month={{job.parameters.start_month}}
               - --end-month={{job.parameters.end_month}}
               - --months={{job.parameters.months}}
+              - --include-weather={{job.parameters.include_weather}}
+              - --weather-only={{job.parameters.weather_only}}
+
+        # plan_months publishes run_markets / run_weather ("true"/"false") for these gates.
+        - task_key: markets_requested
+          depends_on:
+            - task_key: plan_months
+          condition_task:
+            op: EQUAL_TO
+            left: "{{tasks.plan_months.values.run_markets}}"
+            right: "true"
 
         # One for_each per source, one month per iteration. Concurrency is kept low to be
         # polite to the APIs (Yahoo especially) and to cap parallel serverless compute.
         - task_key: backfill_elexon
           depends_on:
             - task_key: plan_months
+            - task_key: markets_requested
+              outcome: "true"
           for_each_task:
             inputs: "{{tasks.plan_months.values.months}}"
             concurrency: 2
@@ -221,6 +237,8 @@ resources:
         - task_key: backfill_entsoe
           depends_on:
             - task_key: plan_months
+            - task_key: markets_requested
+              outcome: "true"
           for_each_task:
             inputs: "{{tasks.plan_months.values.months}}"
             concurrency: 2
@@ -243,6 +261,8 @@ resources:
         - task_key: backfill_fred
           depends_on:
             - task_key: plan_months
+            - task_key: markets_requested
+              outcome: "true"
           for_each_task:
             inputs: "{{tasks.plan_months.values.months}}"
             concurrency: 2
@@ -265,6 +285,8 @@ resources:
         - task_key: backfill_stocks
           depends_on:
             - task_key: plan_months
+            - task_key: markets_requested
+              outcome: "true"
           for_each_task:
             inputs: "{{tasks.plan_months.values.months}}"
             concurrency: 1
@@ -284,9 +306,11 @@ resources:
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: weather_requested
+          depends_on:
+            - task_key: plan_months
           condition_task:
             op: EQUAL_TO
-            left: "{{job.parameters.include_weather}}"
+            left: "{{tasks.plan_months.values.run_weather}}"
             right: "true"
 
         - task_key: backfill_era5
@@ -313,7 +337,7 @@ resources:
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: refresh_pipeline
-          # Once, after every source has finished (skipped ERA5 counts as done). A source
+          # Once, after every source has finished (skipped sources count as done). A source
           # with a few failed months shouldn't hold back the months that did land.
           run_if: AT_LEAST_ONE_SUCCESS
           depends_on:
