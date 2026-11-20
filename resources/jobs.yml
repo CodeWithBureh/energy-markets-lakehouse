@@ -5,6 +5,10 @@
 #  - energy_backfill: on-demand history backfill, month by month (see below)
 #
 # Cost guards: per-task timeouts, limited retries, one run at a time, and job-level timeouts.
+#
+# Serverless environment 4: its base image ships NumPy 2 with a matching pyarrow. On
+# environment 2 our dependencies pulled in NumPy 2 next to the image's NumPy-1 pyarrow, and
+# writing Parquet failed (ERA5).
 
 resources:
   jobs:
@@ -31,12 +35,14 @@ resources:
       environments:
         - environment_key: ingest
           spec:
-            environment_version: "2"
+            environment_version: "4"
             dependencies:
               - ../dist/*.whl
 
       tasks:
         - task_key: ingest_elexon
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
           environment_key: ingest
           timeout_seconds: 900
           max_retries: 2
@@ -51,6 +57,8 @@ resources:
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: ingest_entsoe
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
           environment_key: ingest
           timeout_seconds: 900
           max_retries: 2
@@ -66,6 +74,8 @@ resources:
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: ingest_fred
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
           environment_key: ingest
           timeout_seconds: 600
           max_retries: 2
@@ -81,6 +91,8 @@ resources:
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: ingest_stocks
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
           environment_key: ingest
           timeout_seconds: 600
           max_retries: 2
@@ -129,7 +141,7 @@ resources:
       environments:
         - environment_key: ingest
           spec:
-            environment_version: "2"
+            environment_version: "4"
             dependencies:
               - ../dist/*.whl
       tasks:
@@ -182,7 +194,7 @@ resources:
       environments:
         - environment_key: ingest
           spec:
-            environment_version: "2"
+            environment_version: "4"
             dependencies:
               - ../dist/*.whl
 
@@ -212,6 +224,8 @@ resources:
         # One for_each per source, one month per iteration. Concurrency is kept low to be
         # polite to the APIs (Yahoo especially) and to cap parallel serverless compute.
         - task_key: backfill_elexon
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
           depends_on:
             - task_key: plan_months
             - task_key: markets_requested
@@ -235,6 +249,8 @@ resources:
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: backfill_entsoe
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
           depends_on:
             - task_key: plan_months
             - task_key: markets_requested
@@ -259,6 +275,8 @@ resources:
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: backfill_fred
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
           depends_on:
             - task_key: plan_months
             - task_key: markets_requested
@@ -283,6 +301,8 @@ resources:
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: backfill_stocks
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
           depends_on:
             - task_key: plan_months
             - task_key: markets_requested
@@ -314,6 +334,8 @@ resources:
             right: "true"
 
         - task_key: backfill_era5
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
           depends_on:
             - task_key: plan_months
             - task_key: weather_requested
@@ -337,9 +359,10 @@ resources:
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: refresh_pipeline
-          # Once, after every source has finished (skipped sources count as done). A source
-          # with a few failed months shouldn't hold back the months that did land.
-          run_if: AT_LEAST_ONE_SUCCESS
+          # Once, after every source has finished, whatever their outcome: a for_each with one
+          # failed month still landed the others, and they shouldn't be held back. A failed
+          # source leaves the run as SUCCESS_WITH_FAILURES and emails via its own alert.
+          run_if: ALL_DONE
           depends_on:
             - task_key: backfill_elexon
             - task_key: backfill_entsoe

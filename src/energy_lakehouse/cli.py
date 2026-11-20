@@ -18,6 +18,7 @@ import logging
 import sys
 import tempfile
 import time
+import zipfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -204,7 +205,9 @@ def run_era5(root: str, start: date, end: date, ts: str, scope: str | None) -> R
                 nc = Path(tmp) / f"era5_gb_{label}.nc"
                 era5.fetch_month(key, year, month, [d.day for d in group], nc)
                 anchor = group[0]
-                land_bytes(root, "era5", "gb_hourly_netcdf", anchor, nc.read_bytes(), "nc", ts)
+                # Mixed instant/accumulated variables come back zipped (see era5_netcdf).
+                ext = "zip" if zipfile.is_zipfile(nc) else "nc"
+                land_bytes(root, "era5", "gb_hourly_netcdf", anchor, nc.read_bytes(), ext, ts)
                 df = flatten_era5(nc)
                 rep.rows_hint += len(df)
                 log.info("ERA5 %s: %d grid rows in %.1fs", label, len(df), time.monotonic() - t0)
@@ -294,6 +297,18 @@ def main(argv: list[str] | None = None) -> int:
         # missing zone or ticker shouldn't block the whole pipeline.
         return 1 if not rep.files else 0
     return 0
+
+
+class IngestFailed(RuntimeError):
+    """Raised by the wheel entry point so the Databricks task is marked as failed."""
+
+
+def run(argv: list[str] | None = None) -> None:
+    """Entry point for python_wheel_task. Databricks calls it and ignores the return
+    value, so a non-zero exit code from main() would otherwise leave the task green."""
+    code = main(argv)
+    if code:
+        raise IngestFailed(f"ingest exited with code {code}; see the errors logged above")
 
 
 if __name__ == "__main__":

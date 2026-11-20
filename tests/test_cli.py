@@ -70,3 +70,13 @@ def test_era5_end_is_clipped_to_the_publication_lag(tmp_path, monkeypatch):
     assert main(["--source=era5", f"--landing-root={tmp_path}",
                  "--start=2026-11-15", "--end=2026-11-18"]) == 0
     assert len(seen) == 1
+
+def test_wheel_entry_point_raises_so_the_task_fails(tmp_path):
+    import pytest
+
+    from energy_lakehouse.cli import IngestFailed, run
+
+    # Cost guard -> main() returns 2. Databricks ignores return values, so run() must raise.
+    with pytest.raises(IngestFailed, match="code 2"):
+        run(["--source=elexon", f"--landing-root={tmp_path}",
+             "--start=2025-01-01", "--end=2025-12-31"])

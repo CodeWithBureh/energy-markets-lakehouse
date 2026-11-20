@@ -44,6 +44,30 @@ def test_flatten_era5(tmp_path):
     assert ts_type.unit == "us"   # Spark-friendly precision
 
 
+def test_flatten_era5_merges_the_cds_zip_of_instant_and_accum_files(tmp_path):
+    import zipfile
+
+    import xarray as xr
+
+    from energy_lakehouse.parsers.era5_netcdf import flatten_era5
+
+    # What the CDS returns for t2m/winds + ssrd: two NetCDFs zipped, served as one download.
+    full = tmp_path / "full.nc"
+    _synthetic_era5(full)
+    with xr.open_dataset(full) as ds:
+        ds[["t2m", "u100", "v100"]].to_netcdf(tmp_path / "instant.nc")
+        ds[["ssrd"]].to_netcdf(tmp_path / "accum.nc")
+    download = tmp_path / "era5_gb_2026-11.nc"        # same name the CLI downloads to
+    with zipfile.ZipFile(download, "w") as zf:
+        zf.write(tmp_path / "instant.nc", "data_stream-oper_stepType-instant.nc")
+        zf.write(tmp_path / "accum.nc", "data_stream-oper_stepType-accum.nc")
+
+    df = flatten_era5(download)
+    assert list(df.columns) == ["valid_time_utc", "latitude", "longitude", "t2m", "u100", "v100", "ssrd"]
+    assert len(df) == 3 * 2 * 2
+    assert df["ssrd"].eq(7200.0).all() and df["t2m"].eq(280.15).all()
+
+
 def test_group_by_month_splits_requests():
     days = [date(2026, 10, 30), date(2026, 10, 31), date(2026, 11, 1)]
     groups = group_by_month(days)

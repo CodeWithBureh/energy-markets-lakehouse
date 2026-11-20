@@ -114,5 +114,12 @@ def plan_main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def plan_run(argv: list[str] | None = None) -> None:
+    """Entry point for python_wheel_task, which ignores return values (see cli.run)."""
+    code = plan_main(argv)
+    if code:
+        raise RuntimeError(f"plan_backfill exited with code {code}; see the errors logged above")
+
+
 if __name__ == "__main__":
     sys.exit(plan_main())

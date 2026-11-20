@@ -22,10 +22,11 @@ dependencies = [
 dev = ["pytest>=8", "ruff>=0.5", "build>=1.2"]
 
 [project.scripts]
-# Used by the Databricks python_wheel_task (entry_point: ingest)
-ingest = "energy_lakehouse.cli:main"
+# Used by the Databricks python_wheel_task (entry_point: ingest). The run wrappers raise on
+# a non-zero exit code, because the task ignores return values.
+ingest = "energy_lakehouse.cli:run"
 # First task of the energy_backfill job: publishes the months for the for_each tasks
-plan_backfill = "energy_lakehouse.backfill:plan_main"
+plan_backfill = "energy_lakehouse.backfill:plan_run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
