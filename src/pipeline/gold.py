@@ -172,10 +172,47 @@ def _latest_vintage(df, keys, cutoff):
             .withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn"))
 
 
+# Trailing window for the wind forecast correction: days D-365 to D-2. D-1's metered wind
+# isn't complete when the day-ahead forecast for D is made, so it stays out.
+WIND_SCALE_WINDOW_DAYS = (365, 2)
+# No correction until this many half-hours of history (about 90 days) are in the window.
+WIND_SCALE_MIN_PERIODS = 48 * 90
+
+
+def _wind_forecast_scale(fc):
+    """Per settlement date, the least-squares factor k minimising sum((metered - k * WINDFOR)^2)
+    over the trailing window. WINDFOR overshoots metered wind by about 15%, most in strong
+    winds (curtailment); scaling it by k cut the 2026 error from 1.7 to 1.0 GW."""
+    actual = g("fact_gb_half_hourly").select("settlement_date", "settlement_period", "wind_mw")
+    daily = (
+        fc.join(actual, ["settlement_date", "settlement_period"])
+        .filter("wind_mw IS NOT NULL AND wind_forecast_mw IS NOT NULL")
+        .groupBy("settlement_date")
+        .agg(F.sum(F.col("wind_mw") * F.col("wind_forecast_mw")).alias("_sxy"),
+             F.sum(F.col("wind_forecast_mw") ** 2).alias("_sxx"),
+             F.count("*").alias("_n"))
+    )
+    # Every forecast date, including days ahead that have no metered wind yet.
+    back, gap = WIND_SCALE_WINDOW_DAYS
+    w = Window.orderBy("_day").rangeBetween(-back, -gap)
+    return (
+        fc.select("settlement_date").distinct()
+        .join(daily, "settlement_date", "left")
+        .withColumn("_day", F.datediff("settlement_date", F.lit("2000-01-01")))
+        .select(
+            "settlement_date",
+            F.when(F.sum("_n").over(w) >= WIND_SCALE_MIN_PERIODS,
+                   F.sum("_sxy").over(w) / F.sum("_sxx").over(w)).alias("wind_forecast_scale"),
+        )
+    )
+
+
 @dlt.table(name=f"{GOLD}.fact_gb_day_ahead_forecasts",
            comment="One row per GB settlement period: demand, wind and solar forecasts as known "
                    "before the delivery day began (latest vintage published before local "
-                   "midnight), so they can be used as model features without look-ahead.")
+                   "midnight), so they can be used as model features without look-ahead. "
+                   "The *_adjusted_mw columns correct WINDFOR's overshoot with a factor fitted "
+                   "on days D-365 to D-2.")
 def fact_gb_day_ahead_forecasts():
     # Cutoff = start of the delivery day. Everything here was public the day before. A model
     # of the 09:20 day-ahead auction needs an earlier cutoff: filter the silver vintages
@@ -212,7 +249,7 @@ def fact_gb_day_ahead_forecasts():
         F.max("publish_time_utc").alias("wind_solar_forecast_published_utc"),
     )
 
-    return (
+    fc = (
         ndf.withColumn("_wind_hour_utc", F.date_trunc("hour", "start_time_utc"))
         .join(wind, "_wind_hour_utc", "left")
         .join(dgws, period, "left")
@@ -221,6 +258,12 @@ def fact_gb_day_ahead_forecasts():
         # net of embedded generation, WINDFOR covers transmission-connected wind.
         .withColumn("residual_demand_forecast_mw",
                     F.col("demand_forecast_mw") - F.col("wind_forecast_mw"))
+    )
+    adjusted = F.col("wind_forecast_mw") * F.col("wind_forecast_scale")
+    return (
+        fc.join(_wind_forecast_scale(fc), "settlement_date", "left")
+        .withColumn("wind_forecast_adjusted_mw", adjusted)
+        .withColumn("residual_demand_forecast_adjusted_mw", F.col("demand_forecast_mw") - adjusted)
     )
 
 
