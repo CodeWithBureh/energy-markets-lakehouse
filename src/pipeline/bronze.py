@@ -36,6 +36,34 @@ STOCKS_SCHEMA = """
     adj_close DOUBLE, volume DOUBLE, dividends DOUBLE, stock_splits DOUBLE,
     quote_currency STRING
 """
+# Elexon responses are {"data": [...]}. The first two Elexon tables predate explicit schemas
+# and infer theirs; these name the fields we use (numbers as DOUBLE, times as STRING, typed
+# in silver). Other top-level keys, e.g. demand outturn's "metadata", go to _rescued_data.
+ELEXON_DEMAND_OUTTURN_SCHEMA = """
+    data ARRAY<STRUCT<publishTime: STRING, startTime: STRING, settlementDate: STRING,
+                      settlementPeriod: BIGINT, initialDemandOutturn: DOUBLE,
+                      initialTransmissionSystemDemandOutturn: DOUBLE>>
+"""
+ELEXON_MARKET_INDEX_SCHEMA = """
+    data ARRAY<STRUCT<dataset: STRING, startTime: STRING, dataProvider: STRING,
+                      settlementDate: STRING, settlementPeriod: BIGINT, price: DOUBLE,
+                      volume: DOUBLE>>
+"""
+ELEXON_DEMAND_FORECAST_SCHEMA = """
+    data ARRAY<STRUCT<dataset: STRING, publishTime: STRING, startTime: STRING,
+                      settlementDate: STRING, settlementPeriod: BIGINT, boundary: STRING,
+                      demand: DOUBLE>>
+"""
+ELEXON_WIND_FORECAST_SCHEMA = """
+    data ARRAY<STRUCT<dataset: STRING, publishTime: STRING, startTime: STRING,
+                      generation: DOUBLE>>
+"""
+ELEXON_WIND_SOLAR_FORECAST_SCHEMA = """
+    data ARRAY<STRUCT<dataset: STRING, documentId: STRING, documentRevisionNumber: BIGINT,
+                      publishTime: STRING, processType: STRING, businessType: STRING,
+                      psrType: STRING, quantity: DOUBLE, startTime: STRING,
+                      settlementDate: STRING, settlementPeriod: BIGINT>>
+"""
 # flatten_era5 writes every numeric column as float64, so DOUBLE always matches.
 ERA5_SCHEMA = """
     valid_time_utc TIMESTAMP, latitude DOUBLE, longitude DOUBLE, t2m DOUBLE, u10 DOUBLE,
@@ -82,6 +110,25 @@ def elexon_system_prices():
 def elexon_generation_by_fuel():
     return autoload("elexon/generation_by_fuel", "json", multiLine="true",
                     pathGlobFilter="*.json")
+
+
+def _elexon_table(dataset, schema, comment):
+    @dlt.table(name=f"{BRONZE}.elexon_{dataset}", comment=comment)
+    def _table():
+        return autoload(f"elexon/{dataset}", "json", schema, multiLine="true",
+                        pathGlobFilter="*.json")
+
+
+_elexon_table("demand_outturn", ELEXON_DEMAND_OUTTURN_SCHEMA,
+              "Raw Elexon demand outturn (INDO/ITSDO) responses, one row per landed file.")
+_elexon_table("market_index", ELEXON_MARKET_INDEX_SCHEMA,
+              "Raw Elexon market index data (MID) responses, one row per landed file.")
+_elexon_table("demand_forecast", ELEXON_DEMAND_FORECAST_SCHEMA,
+              "Raw Elexon national demand forecasts (NDF), one file per publish day.")
+_elexon_table("wind_forecast", ELEXON_WIND_FORECAST_SCHEMA,
+              "Raw Elexon wind generation forecasts (WINDFOR), one file per publish day.")
+_elexon_table("wind_solar_forecast", ELEXON_WIND_SOLAR_FORECAST_SCHEMA,
+              "Raw Elexon wind and solar forecasts (DGWS), one file per publish day.")
 
 
 @dlt.table(

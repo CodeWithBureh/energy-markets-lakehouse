@@ -122,6 +122,130 @@ upsert("gb_generation_by_fuel", "gb_generation_by_fuel_updates",
        comment="GB half-hourly generation outturn (MW) by fuel type, incl. interconnectors.")
 
 
+def elexon_rows(table):
+    return bronze_stream(table).select(
+        F.explode("data").alias("r"), "_file_modified_at", "_source_file")
+
+
+@dlt.view(name="gb_demand_outturn_updates")
+@dlt.expect_or_drop("valid_period", "settlement_period BETWEEN 1 AND 50")
+@dlt.expect_or_drop("demand_present", "demand_mw IS NOT NULL")
+@dlt.expect("plausible_demand", "demand_mw BETWEEN 5000 AND 70000")
+def gb_demand_outturn_updates():
+    return elexon_rows("elexon_demand_outturn").select(
+        F.to_date("r.settlementDate").alias("settlement_date"),
+        F.col("r.settlementPeriod").cast("int").alias("settlement_period"),
+        F.col("r.initialDemandOutturn").alias("demand_mw"),
+        F.col("r.initialTransmissionSystemDemandOutturn").alias("transmission_demand_mw"),
+        F.col("r.publishTime").cast("timestamp").alias("publish_time_utc"),
+        "_file_modified_at",
+        "_source_file",
+    ).withColumn("start_time_utc", settlement_start_utc("settlement_date", F.col("settlement_period")))
+
+
+upsert("gb_demand_outturn", "gb_demand_outturn_updates",
+       keys=["settlement_date", "settlement_period"],
+       sequence_by=F.struct("publish_time_utc", "_file_modified_at", "_source_file"),
+       metadata_columns=["publish_time_utc"],
+       comment="GB demand outturn (MW) per settlement period: national (INDO) and transmission "
+               "system (ITSDO). Both are net of embedded wind and solar.")
+
+
+@dlt.view(name="gb_market_index_prices_updates")
+@dlt.expect_or_drop("valid_period", "settlement_period BETWEEN 1 AND 50")
+@dlt.expect_or_drop("price_present", "price_gbp_mwh IS NOT NULL")
+@dlt.expect("plausible_price", "price_gbp_mwh BETWEEN -1000 AND 10000")
+def gb_market_index_prices_updates():
+    return elexon_rows("elexon_market_index").select(
+        F.to_date("r.settlementDate").alias("settlement_date"),
+        F.col("r.settlementPeriod").cast("int").alias("settlement_period"),
+        F.col("r.dataProvider").alias("data_provider"),
+        F.col("r.price").alias("price_gbp_mwh"),
+        F.col("r.volume").alias("volume_mwh"),
+        "_file_modified_at",
+        "_source_file",
+    ).withColumn("start_time_utc", settlement_start_utc("settlement_date", F.col("settlement_period")))
+
+
+upsert("gb_market_index_prices", "gb_market_index_prices_updates",
+       keys=["settlement_date", "settlement_period", "data_provider"],
+       comment="GB market index price (GBP/MWh) and traded volume per settlement period and "
+               "provider. APXMIDP carries the trades; N2EXMIDP reports zero volume.")
+
+
+# Forecasts keep every vintage: the publish time is part of the key, so a later forecast
+# for the same period is a new row, not a revision. Gold picks the vintage it needs.
+
+@dlt.view(name="gb_demand_forecast_updates")
+@dlt.expect_or_drop("valid_period", "settlement_period BETWEEN 1 AND 50")
+@dlt.expect_or_drop("demand_present", "demand_mw IS NOT NULL")
+@dlt.expect("plausible_demand", "demand_mw BETWEEN 5000 AND 70000")
+def gb_demand_forecast_updates():
+    return elexon_rows("elexon_demand_forecast").select(
+        F.col("r.publishTime").cast("timestamp").alias("publish_time_utc"),
+        F.to_date("r.settlementDate").alias("settlement_date"),
+        F.col("r.settlementPeriod").cast("int").alias("settlement_period"),
+        F.col("r.startTime").cast("timestamp").alias("start_time_utc"),
+        F.col("r.demand").alias("demand_mw"),
+        F.col("r.boundary").alias("boundary"),
+        "_file_modified_at",
+        "_source_file",
+    )
+
+
+upsert("gb_demand_forecast", "gb_demand_forecast_updates",
+       keys=["publish_time_utc", "settlement_date", "settlement_period"],
+       comment="GB national demand forecast (NDF, MW), every published vintage.",
+       cluster_by=["settlement_date"])
+
+
+@dlt.view(name="gb_wind_forecast_updates")
+@dlt.expect_or_drop("generation_present", "wind_mw IS NOT NULL")
+@dlt.expect("plausible_wind", "wind_mw BETWEEN 0 AND 40000")
+def gb_wind_forecast_updates():
+    return elexon_rows("elexon_wind_forecast").select(
+        F.col("r.publishTime").cast("timestamp").alias("publish_time_utc"),
+        F.col("r.startTime").cast("timestamp").alias("start_time_utc"),
+        F.col("r.generation").alias("wind_mw"),
+        "_file_modified_at",
+        "_source_file",
+    )
+
+
+upsert("gb_wind_forecast", "gb_wind_forecast_updates",
+       keys=["publish_time_utc", "start_time_utc"],
+       comment="Hourly wind generation forecast (WINDFOR, MW) for transmission-connected "
+               "wind, every published vintage.",
+       cluster_by=["start_time_utc"])
+
+
+@dlt.view(name="gb_wind_solar_forecast_updates")
+@dlt.expect_or_drop("valid_period", "settlement_period BETWEEN 1 AND 50")
+@dlt.expect_or_drop("quantity_present", "forecast_mw IS NOT NULL")
+@dlt.expect("non_negative", "forecast_mw >= 0")
+def gb_wind_solar_forecast_updates():
+    return elexon_rows("elexon_wind_solar_forecast").select(
+        F.col("r.publishTime").cast("timestamp").alias("publish_time_utc"),
+        F.col("r.processType").alias("process_type"),
+        F.col("r.psrType").alias("psr_type"),
+        F.to_date("r.settlementDate").alias("settlement_date"),
+        F.col("r.settlementPeriod").cast("int").alias("settlement_period"),
+        F.col("r.startTime").cast("timestamp").alias("start_time_utc"),
+        F.col("r.quantity").alias("forecast_mw"),
+        F.col("r.documentRevisionNumber").cast("int").alias("document_revision"),
+        "_file_modified_at",
+        "_source_file",
+    )
+
+
+upsert("gb_wind_solar_forecast", "gb_wind_solar_forecast_updates",
+       keys=["publish_time_utc", "process_type", "psr_type", "settlement_date",
+             "settlement_period"],
+       comment="Half-hourly solar, onshore and offshore wind forecasts (DGWS, MW): day-ahead "
+               "and intraday, every published vintage.",
+       cluster_by=["settlement_date"])
+
+
 # --- Europe (ENTSO-E) ------------------------------------------------------------------
 
 @dlt.view(name="eu_day_ahead_prices_updates")

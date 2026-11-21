@@ -75,10 +75,8 @@ def run_elexon(root: str, start: date, end: date, ts: str) -> RunReport:
     rep = RunReport("elexon")
     s = make_session()
     for d in daterange(start, end):
-        for dataset, fn in (
-            ("system_prices", elexon.fetch_system_prices),
-            ("generation_by_fuel", elexon.fetch_generation_by_fuel),
-        ):
+        # Outturn and prices are dated by settlement day, forecasts by publish day.
+        for dataset, fn in elexon.DATASETS.items():
             t0 = time.monotonic()
             try:
                 body = fn(s, d)

@@ -134,17 +134,94 @@ def fact_gb_half_hourly():
         "settlement_date", "settlement_period", "start_time_utc",
         "system_price_gbp_mwh", "net_imbalance_volume_mwh",
     )
+    demand = s("gb_demand_outturn").select(
+        "settlement_date", "settlement_period", "demand_mw", "transmission_demand_mw")
+    # APX is the only provider with trades; a period with no volume has no real price.
+    apx = s("gb_market_index_prices").filter("data_provider = 'APXMIDP'").select(
+        "settlement_date", "settlement_period",
+        F.when(F.col("volume_mwh") > 0, F.col("price_gbp_mwh")).alias("market_index_price_gbp_mwh"),
+        F.col("volume_mwh").alias("market_index_volume_mwh"),
+    )
     # ERA5 values are stamped at the END of their hour, so a half-hour starting at 10:00
     # or 10:30 maps to the ERA5 record valid at 11:00.
     weather = g("gb_weather_hourly")
     df = (
         prices.join(mix, ["settlement_date", "settlement_period"], "left")
+        .join(demand, ["settlement_date", "settlement_period"], "left")
+        .join(apx, ["settlement_date", "settlement_period"], "left")
+        # Demand left for dispatchable plant and imports once wind has run. INDO is already
+        # net of embedded wind and solar, so only transmission-connected wind comes off.
+        .withColumn("residual_demand_mw", F.col("demand_mw") - F.col("wind_mw"))
         .withColumn("weather_hour_utc", F.date_trunc("hour", "start_time_utc") + F.expr("INTERVAL 1 HOUR"))
         .join(weather.withColumnRenamed("valid_time_utc", "weather_hour_utc"), "weather_hour_utc", "left")
         .withColumn("wind_share", F.col("wind_mw") / F.col("domestic_generation_mw"))
         .withColumn("gas_share", F.col("gas_mw") / F.col("domestic_generation_mw"))
     )
     return df.drop("grid_cells")
+
+
+def _day_start_utc(date_col):
+    """UTC instant of local (Europe/London) midnight at the start of a settlement day."""
+    return F.to_utc_timestamp(F.to_timestamp(date_col), "Europe/London")
+
+
+def _latest_vintage(df, keys, cutoff):
+    """Per ``keys``, the newest row published strictly before ``cutoff``."""
+    w = Window.partitionBy(*keys).orderBy(F.col("publish_time_utc").desc())
+    return (df.filter(F.col("publish_time_utc") < cutoff)
+            .withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn"))
+
+
+@dlt.table(name=f"{GOLD}.fact_gb_day_ahead_forecasts",
+           comment="One row per GB settlement period: demand, wind and solar forecasts as known "
+                   "before the delivery day began (latest vintage published before local "
+                   "midnight), so they can be used as model features without look-ahead.")
+def fact_gb_day_ahead_forecasts():
+    # Cutoff = start of the delivery day. Everything here was public the day before. A model
+    # of the 09:20 day-ahead auction needs an earlier cutoff: filter the silver vintages
+    # directly (the publish times below show how old each forecast was).
+    period = ["settlement_date", "settlement_period"]
+
+    ndf = s("gb_demand_forecast")
+    ndf = _latest_vintage(ndf, period, _day_start_utc("settlement_date")).select(
+        *period, "start_time_utc",
+        F.col("demand_mw").alias("demand_forecast_mw"),
+        F.col("publish_time_utc").alias("demand_forecast_published_utc"),
+    )
+
+    # WINDFOR is hourly with no settlement date: date each hour by its London day.
+    wind = s("gb_wind_forecast").withColumn(
+        "_day", F.to_date(F.from_utc_timestamp("start_time_utc", "Europe/London")))
+    wind = _latest_vintage(wind, ["start_time_utc"], _day_start_utc("_day")).select(
+        F.col("start_time_utc").alias("_wind_hour_utc"),
+        F.col("wind_mw").alias("wind_forecast_mw"),
+        F.col("publish_time_utc").alias("wind_forecast_published_utc"),
+    )
+
+    # DGWS day-ahead run (published ~16:45 UK the day before), one row per technology.
+    dgws = s("gb_wind_solar_forecast").filter("process_type = 'Day ahead'")
+    dgws = _latest_vintage(dgws, [*period, "psr_type"], _day_start_utc("settlement_date"))
+    psr = F.col("psr_type")
+    dgws = dgws.groupBy(*period).agg(
+        F.first(F.when(psr == "Solar", F.col("forecast_mw")), ignorenulls=True)
+        .alias("solar_forecast_mw"),
+        F.first(F.when(psr == "Wind Onshore", F.col("forecast_mw")), ignorenulls=True)
+        .alias("wind_onshore_forecast_mw"),
+        F.first(F.when(psr == "Wind Offshore", F.col("forecast_mw")), ignorenulls=True)
+        .alias("wind_offshore_forecast_mw"),
+        F.max("publish_time_utc").alias("wind_solar_forecast_published_utc"),
+    )
+
+    return (
+        ndf.withColumn("_wind_hour_utc", F.date_trunc("hour", "start_time_utc"))
+        .join(wind, "_wind_hour_utc", "left")
+        .join(dgws, period, "left")
+        .drop("_wind_hour_utc")
+        # Same definition as fact_gb_half_hourly.residual_demand_mw, from forecasts: NDF is
+        # net of embedded generation, WINDFOR covers transmission-connected wind.
+        .withColumn("residual_demand_forecast_mw",
+                    F.col("demand_forecast_mw") - F.col("wind_forecast_mw"))
+    )
 
 
 @dlt.table(name=f"{GOLD}.fact_eu_day_ahead_hourly",
@@ -178,6 +255,13 @@ def fact_market_daily():
         F.max("system_price_gbp_mwh").alias("gb_max_price_gbp_mwh"),
         F.stddev("system_price_gbp_mwh").alias("gb_price_volatility"),
         F.sum("net_imbalance_volume_mwh").alias("gb_net_imbalance_mwh"),
+        (F.sum(F.col("market_index_price_gbp_mwh") * F.col("market_index_volume_mwh"))
+         / F.sum(F.when(F.col("market_index_price_gbp_mwh").isNotNull(),
+                        F.col("market_index_volume_mwh"))))
+        .alias("gb_market_index_price_gbp_mwh"),               # volume-weighted
+        F.avg("demand_mw").alias("gb_avg_demand_mw"),
+        F.max("demand_mw").alias("gb_peak_demand_mw"),
+        F.avg("residual_demand_mw").alias("gb_avg_residual_demand_mw"),
         F.avg("wind_share").alias("avg_wind_share"),
         F.avg("gas_share").alias("avg_gas_share"),
         F.avg("avg_temp_c").alias("avg_temp_c"),
