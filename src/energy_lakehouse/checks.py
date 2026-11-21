@@ -31,13 +31,25 @@ SILVER_KEYS = {
     "fred_observations": ["series_id", "obs_date"],
     "stock_prices_daily": ["ticker", "trade_date"],
     "era5_gb_grid_hourly": ["valid_time_utc", "latitude", "longitude"],
+    "gb_demand_outturn": ["settlement_date", "settlement_period"],
+    "gb_market_index_prices": ["settlement_date", "settlement_period", "data_provider"],
+    "gb_demand_forecast": ["publish_time_utc", "settlement_date", "settlement_period"],
+    "gb_wind_forecast": ["publish_time_utc", "start_time_utc"],
+    "gb_wind_solar_forecast": ["publish_time_utc", "process_type", "psr_type",
+                               "settlement_date", "settlement_period"],
 }
 SILVER_TABLES = [*SILVER_KEYS, "fx_rates_daily", "gas_prices"]
 GOLD_TABLES = ["dim_date", "dim_company", "dim_fx_daily", "gb_weather_hourly",
                "fact_gb_half_hourly", "fact_eu_day_ahead_hourly", "fact_market_daily",
-               "fact_stock_returns_daily", "mart_stocks_vs_market"]
+               "fact_stock_returns_daily", "mart_stocks_vs_market",
+               "fact_gb_day_ahead_forecasts"]
 # Loaded only by the weekly ERA5 job or a weather backfill, so may be empty in a fresh copy.
 OPTIONAL_TABLES = {"era5_gb_grid_hourly", "gb_weather_hourly"}
+# Added in Nov 2026. Prod's deploy checks run before the first daily run has loaded them,
+# so they only warn for now; move them to required once prod has been backfilled.
+OPTIONAL_TABLES |= {"gb_demand_outturn", "gb_market_index_prices", "gb_demand_forecast",
+                    "gb_wind_forecast", "gb_wind_solar_forecast",
+                    "fact_gb_day_ahead_forecasts"}
 
 # Wide enough for any real GB imbalance price; anything outside is a parsing bug.
 PRICE_BOUNDS = (-1000.0, 10000.0)
