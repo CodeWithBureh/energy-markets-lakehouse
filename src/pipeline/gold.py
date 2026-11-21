@@ -329,11 +329,18 @@ def fact_market_daily():
     eug = gas.filter("benchmark = 'eu_gas'").select(
         F.col("obs_date").alias("month_start"), F.col("price_usd_mmbtu").alias("eu_gas_usd_mmbtu"))
 
+    sap = s("gb_gas_sap_daily").select(
+        F.col("gas_day").alias("date"), F.col("sap_gbp_mwh").alias("gb_gas_sap_gbp_mwh"))
+    ttf = s("ttf_gas_daily").select(
+        F.col("trade_date").alias("date"), F.col("close_eur_mwh").alias("ttf_eur_mwh"))
+
     base = (
         g("dim_date").select("date", "is_weekend", "expected_settlement_periods")
         .join(gb, "date", "inner")
         .join(eu, "date", "left")
         .join(hh, "date", "left")
+        .join(sap, "date", "left")
+        .join(ttf, "date", "left")
         .join(g("dim_fx_daily"), "date", "left")
         .withColumn("month_start", F.trunc("date", "month"))
         .join(eug, "month_start", "left")
@@ -341,6 +348,9 @@ def fact_market_daily():
     )
     return (
         base.withColumn("henry_hub_usd_mmbtu", _ffill("henry_hub_usd_mmbtu"))
+        # TTF trades on weekdays only: weekends and holidays carry the last close.
+        .withColumn("ttf_eur_mwh", _ffill("ttf_eur_mwh"))
+        .withColumn("ttf_gbp_mwh", F.col("ttf_eur_mwh") * F.col("gbp_per_eur"))
         .withColumn("gb_fr_spread_gbp_mwh", F.col("gb_avg_price_gbp_mwh") - F.col("fr_avg_price_gbp_mwh"))
         .withColumn("is_complete_day", F.col("settlement_periods_loaded") == F.col("expected_settlement_periods"))
     )
