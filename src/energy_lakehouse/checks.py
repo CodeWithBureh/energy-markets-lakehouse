@@ -45,11 +45,6 @@ GOLD_TABLES = ["dim_date", "dim_company", "dim_fx_daily", "gb_weather_hourly",
                "fact_gb_day_ahead_forecasts"]
 # Loaded only by the weekly ERA5 job or a weather backfill, so may be empty in a fresh copy.
 OPTIONAL_TABLES = {"era5_gb_grid_hourly", "gb_weather_hourly"}
-# Added in Nov 2026. Prod's deploy checks run before the first daily run has loaded them,
-# so they only warn for now; move them to required once prod has been backfilled.
-OPTIONAL_TABLES |= {"gb_demand_outturn", "gb_market_index_prices", "gb_demand_forecast",
-                    "gb_wind_forecast", "gb_wind_solar_forecast",
-                    "fact_gb_day_ahead_forecasts"}
 
 # Wide enough for any real GB imbalance price; anything outside is a parsing bug.
 PRICE_BOUNDS = (-1000.0, 10000.0)
