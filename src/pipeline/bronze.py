@@ -64,6 +64,14 @@ ELEXON_WIND_SOLAR_FORECAST_SCHEMA = """
                       psrType: STRING, quantity: DOUBLE, startTime: STRING,
                       settlementDate: STRING, settlementPeriod: BIGINT>>
 """
+GAS_SAP_SCHEMA = """
+    gas_day STRING, sap_p_kwh DOUBLE, applicable_at_local STRING, generated_at_local STRING,
+    quality_indicator STRING
+"""
+GAS_TTF_SCHEMA = """
+    ticker STRING, trade_date STRING, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
+    volume DOUBLE, currency STRING, unit STRING
+"""
 # flatten_era5 writes every numeric column as float64, so DOUBLE always matches.
 ERA5_SCHEMA = """
     valid_time_utc TIMESTAMP, latitude DOUBLE, longitude DOUBLE, t2m DOUBLE, u10 DOUBLE,
@@ -155,6 +163,22 @@ def fred_observations():
 )
 def stock_daily_prices():
     return autoload("stocks/daily_prices", "json", STOCKS_SCHEMA, pathGlobFilter="*.jsonl")
+
+
+@dlt.table(
+    name=f"{BRONZE}.gas_sap",
+    comment="GB System Average Price of gas per gas day (National Gas, PUBOB603), as landed.",
+)
+def gas_sap():
+    return autoload("gas/sap", "json", GAS_SAP_SCHEMA, pathGlobFilter="*.jsonl")
+
+
+@dlt.table(
+    name=f"{BRONZE}.gas_ttf",
+    comment="Daily TTF front-month future (yfinance TTF=F, EUR/MWh), as landed.",
+)
+def gas_ttf():
+    return autoload("gas/ttf", "json", GAS_TTF_SCHEMA, pathGlobFilter="*.jsonl")
 
 
 @dlt.table(

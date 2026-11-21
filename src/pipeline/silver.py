@@ -331,6 +331,45 @@ def gas_prices():
     )
 
 
+@dlt.view(name="gb_gas_sap_daily_updates")
+@dlt.expect_or_drop("sap_present", "sap_p_kwh IS NOT NULL")
+@dlt.expect("plausible_sap", "sap_p_kwh BETWEEN 0 AND 100")
+def gb_gas_sap_daily_updates():
+    return bronze_stream("gas_sap").select(
+        F.to_date("gas_day").alias("gas_day"),
+        "sap_p_kwh",
+        # 1 p/kWh = 10 GBP/MWh
+        (F.col("sap_p_kwh") * 10).alias("sap_gbp_mwh"),
+        "_file_modified_at",
+        "_source_file",
+    )
+
+
+upsert("gb_gas_sap_daily", "gb_gas_sap_daily_updates",
+       keys=["gas_day"],
+       comment="GB System Average Price (SAP) of gas per gas day (05:00-05:00 UK), in p/kWh and "
+               "GBP/MWh. Source: National Gas Transmission.")
+
+
+@dlt.view(name="ttf_gas_daily_updates")
+@dlt.expect_or_drop("close_present", "close_eur_mwh IS NOT NULL")
+@dlt.expect("plausible_ttf", "close_eur_mwh BETWEEN 0 AND 1000")
+def ttf_gas_daily_updates():
+    return bronze_stream("gas_ttf").select(
+        F.to_date("trade_date").alias("trade_date"),
+        F.col("close").alias("close_eur_mwh"),
+        F.col("high").alias("high_eur_mwh"),
+        F.col("low").alias("low_eur_mwh"),
+        "_file_modified_at",
+        "_source_file",
+    )
+
+
+upsert("ttf_gas_daily", "ttf_gas_daily_updates",
+       keys=["trade_date"],
+       comment="Dutch TTF front-month gas future, daily close (EUR/MWh), trading days only.")
+
+
 # --- Equities --------------------------------------------------------------------------
 
 @dlt.view(name="stock_prices_daily_updates")

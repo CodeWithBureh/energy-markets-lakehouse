@@ -5,6 +5,7 @@ Examples
     ingest --source elexon --landing-root /Volumes/energy/raw/landing
     ingest --source entsoe --start 2026-10-01 --end 2026-10-31 --landing-root ./landing
     ingest --source era5   --secret-scope energy --landing-root /Volumes/energy/raw/landing
+    ingest --source gas    --start 2024-01-01 --end 2024-01-31 --landing-root ./landing
 
 With no --start/--end, each source uses a sensible rolling window that overlaps earlier
 runs, so revisions and late data get picked up. Bronze is append-only and silver dedupes.
@@ -33,7 +34,7 @@ from energy_lakehouse.timeutils import BRUSSELS, daterange, parse_iso_utc, today
 
 log = logging.getLogger("energy_lakehouse")
 
-SOURCES = ("elexon", "entsoe", "fred", "stocks", "era5")
+SOURCES = ("elexon", "entsoe", "fred", "stocks", "era5", "gas")
 
 
 @dataclass
@@ -60,6 +61,9 @@ def default_window(source: str, today: date) -> tuple[date, date]:
     if source == "fred":
         return today - timedelta(days=14), today
     if source == "stocks":
+        return today - timedelta(days=7), today
+    if source == "gas":
+        # SAP for gas day D is final around 11:40 on D+1, and TTF settles after the close.
         return today - timedelta(days=7), today
     if source == "era5":
         end = today - timedelta(days=config.ERA5_LATENCY_DAYS)
@@ -186,6 +190,31 @@ def run_stocks(root: str, start: date, end: date, ts: str) -> RunReport:
     return rep
 
 
+def run_gas(root: str, start: date, end: date, ts: str) -> RunReport:
+    from energy_lakehouse.sources import gas
+
+    rep = RunReport("gas")
+    s = make_session()
+    fetchers = {"sap": lambda: gas.fetch_sap(s, start, end),
+                "ttf": lambda: gas.fetch_ttf(start, end)}
+    for dataset, fetch in fetchers.items():
+        t0 = time.monotonic()
+        try:
+            body = fetch()
+            n = body.count(b"\n")
+            log.info("Gas %s %s..%s: %d days in %.1fs", dataset, start, end, n,
+                     time.monotonic() - t0)
+            if not body:
+                log.warning("Gas %s %s..%s: no rows", dataset, start, end)
+                continue
+            rep.rows_hint += n
+            rep.files.append(str(land_bytes(root, "gas", dataset, end, body, "jsonl", ts)))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Gas %s failed after %.1fs: %s", dataset, time.monotonic() - t0, exc)
+            rep.errors.append(f"{dataset}: {exc}")
+    return rep
+
+
 def run_era5(root: str, start: date, end: date, ts: str, scope: str | None) -> RunReport:
     from energy_lakehouse.parsers.era5_netcdf import flatten_era5, to_parquet_bytes
     from energy_lakehouse.sources import era5
@@ -281,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
         rep = run_fred(root, start, end, ts, args.secret_scope)
     elif args.source == "stocks":
         rep = run_stocks(root, start, end, ts)
+    elif args.source == "gas":
+        rep = run_gas(root, start, end, ts)
     else:
         rep = run_era5(root, start, end, ts, args.secret_scope)
 
