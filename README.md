@@ -66,7 +66,8 @@ sql/                           dashboard and FinOps starter queries
 * `fact_gb_half_hourly`: system price, market index price (APX), imbalance, demand and
   residual demand, generation mix, wind/gas share, weather
 * `fact_gb_day_ahead_forecasts`: demand, wind and solar forecasts per settlement period, as
-  published before the delivery day began (no look-ahead, so usable as model features)
+  published before the delivery day began (no look-ahead, so usable as model features), plus
+  a wind forecast corrected for WINDFOR's overshoot (factor fitted on days D-365 to D-2)
 * `fact_eu_day_ahead_hourly`: FR, NL, BE, NO2, DK1 and IE prices in EUR and GBP
 * `fact_market_daily`: daily GB price stats, market index price, demand, neighbour prices,
   GB–FR spread, gas, FX, weather
