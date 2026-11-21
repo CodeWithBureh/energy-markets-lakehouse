@@ -199,16 +199,32 @@ so a deploy from your laptop would create a second copy of every job.
 ### CI/CD flow
 
 ```
-feature branch ──PR──▶ dev ──PR──▶ main
-   tests,              deploy -t ci,   deploy -t prod,
-   validate ci+prod    run it, check   validate-only, check
+feature branch ──PR──▶ dev ──auto PR──▶ main
+   tests,              deploy -t ci,        deploy -t prod,
+   validate ci+prod    run it, check        validate-only, check
 ```
+
+Promotion is automatic: when a push to `dev` passes in the ci copy, the `promote` job opens a
+`dev` → `main` pull request (or reuses the open one) and turns on auto-merge. GitHub merges
+it once `main`'s required checks pass, and that merge deploys prod. A failure anywhere on
+the way stops the promotion; fix it on `dev` and the next push tries again. To hold a
+release back, turn auto-merge off on the open promotion pull request.
+
+Setup (once):
+1. Create a fine-grained personal access token (GitHub → Settings → Developer settings):
+   this repository only, permissions **Contents: read and write** and **Pull requests: read
+   and write**. Save it as the repo secret `PROMOTE_TOKEN`. `GITHUB_TOKEN` can't be used:
+   pull requests and merges made with it don't trigger workflows, so `main`'s checks and the
+   prod deploy would never run.
+2. Repo settings: allow auto-merge, and leave "Automatically delete head branches" off (it
+   would delete `dev` after each promotion). `main`'s protection doesn't require branches to
+   be up to date, because each promotion's merge commit is on `main` only.
 
 | Event | What runs |
 | --- | --- |
 | Pull request into `dev` or `main` | ruff, pytest with coverage, build the wheel and start each entry point, `bundle validate` for `ci` and `prod` |
 | Pull request into `main` | also: the source branch must be `dev` (or `hotfix/*`) |
-| Push to `dev` | `bundle deploy -t ci`, pipeline validate-only update, the full `energy_daily` job (fails on `SUCCESS_WITH_FAILURES` too), then `energy_checks` |
+| Push to `dev` | `bundle deploy -t ci`, pipeline validate-only update, the full `energy_daily` job (fails on `SUCCESS_WITH_FAILURES` too), then `energy_checks`; if all pass, `promote` opens the `dev` → `main` pull request with auto-merge |
 | Push to `main` | `bundle deploy -t prod`, pipeline validate-only update, `energy_checks` against prod data (read-only; the schedule owns the runs) |
 
 `energy_checks` (`src/energy_lakehouse/checks.py`) fails the run when a required check
