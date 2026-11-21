@@ -57,7 +57,7 @@ src/energy_lakehouse/          ingestion library (built into a wheel)
 src/pipeline/                  bronze.py, silver.py, gold.py (Lakeflow pipeline code)
 tests/                         pytest: clock changes, XML parsing, NetCDF flattening, cost guard
 sql/                           dashboard and FinOps starter queries
-.github/workflows/ci.yml       test on PR, deploy to prod on main
+.github/workflows/ci.yml       test + validate on PR, deploy and test the ci copy on dev, prod on main
 ```
 
 ## Data model (gold)
@@ -169,6 +169,58 @@ names must match `SECRET_KEYS` in `config.py`.
    `DATABRICKS_CLIENT_SECRET`. The deploy job in `ci.yml` uses `environment: prod`, so PR
    runs can't read them.
 
+#### 3c. CI service principal (dev branch)
+
+The `dev` branch deploys a shared test copy, the `ci` target: catalog `energy_dev`, schemas
+`ci_raw`/`ci_bronze`/`ci_silver`/`ci_gold`, jobs named `[ci] …`, schedules paused. It runs as
+its own service principal so it can't touch prod, and prod's can't touch it.
+
+1. **Create it** as in 3b.1, named `energy-ci-sp`, and generate an OAuth secret (3b.3).
+2. **Grant it the dev catalog only**:
+   ```sql
+   GRANT USE CATALOG, USE SCHEMA, CREATE SCHEMA, CREATE TABLE, CREATE MATERIALIZED VIEW,
+         CREATE VOLUME, SELECT, MODIFY, READ VOLUME, WRITE VOLUME
+   ON CATALOG energy_dev TO `<ci-application-id>`;
+   ```
+3. **GitHub**: add repository secrets `DEV_DATABRICKS_CLIENT_ID` and
+   `DEV_DATABRICKS_CLIENT_SECRET`. Pull-request validation also reads them, so they're
+   repository secrets rather than environment secrets.
+4. **Seed it once**: Actions → ci → Run workflow on `dev`, with `seed_start_month` about
+   three months back (e.g. `2026-08`), so monthly FRED series have rows. Later runs only need
+   the daily job's rolling windows.
+
+Only CI should deploy `-t ci`: its deployment state lives in the CI principal's home folder,
+so a deploy from your laptop would create a second copy of every job.
+
+### CI/CD flow
+
+```
+feature branch ──PR──▶ dev ──PR──▶ main
+   tests,              deploy -t ci,   deploy -t prod,
+   validate ci+prod    run it, check   validate-only, check
+```
+
+| Event | What runs |
+| --- | --- |
+| Pull request into `dev` or `main` | ruff, pytest with coverage, build the wheel and start each entry point, `bundle validate` for `ci` and `prod` |
+| Pull request into `main` | also: the source branch must be `dev` (or `hotfix/*`) |
+| Push to `dev` | `bundle deploy -t ci`, pipeline validate-only update, the full `energy_daily` job (fails on `SUCCESS_WITH_FAILURES` too), then `energy_checks` |
+| Push to `main` | `bundle deploy -t prod`, pipeline validate-only update, `energy_checks` against prod data (read-only; the schedule owns the runs) |
+
+`energy_checks` (`src/energy_lakehouse/checks.py`) fails the run when a required check
+fails: every silver and gold table has rows, current silver rows are unique on their keys,
+GB and EU prices reach within `max_age_days` (default 3) of today, no incomplete settlement
+days in the last 30, and GB prices are present and within range. ERA5 checks only warn,
+because only the weekly job loads weather. Run it any time:
+```bash
+databricks bundle run -t prod energy_checks
+databricks bundle run -t dev energy_checks --params max_age_days=7   # dev is rarely run
+```
+
+Recommended repo settings: protect `dev` and `main` (pull requests only, require the `test`
+and `validate` checks, plus `promotion-guard` on `main`), and add a required reviewer to the
+`prod` environment. Dependabot opens weekly update PRs against `dev`.
+
 ### 4. Dev
 ```bash
 databricks auth login --host https://adb-<id>.<n>.azuredatabricks.net
@@ -197,7 +249,8 @@ stocks). Expect it to be slow: the Copernicus queue can take up to an hour per m
 If some months fail, open the run and click **Repair run**: only the failed months rerun.
 
 ### 5. Prod
-Pushes to `main` run the tests and then deploy prod as the service principal (step 3b.7).
+Pushes to `main` run the tests, deploy prod as the service principal (step 3b.7), then run a
+validate-only pipeline update and `energy_checks` (see CI/CD flow).
 
 > **Tip:** let CI run the first prod deploy rather than running `bundle deploy -t prod` from
 > your laptop. CI signs in as the service principal, so the prod schemas and Volume end up

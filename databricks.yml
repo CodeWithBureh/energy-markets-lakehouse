@@ -52,6 +52,23 @@ targets:
     variables:
       catalog: energy_dev
 
+  # Shared integration-test copy, deployed only by CI from the dev branch, as the CI
+  # service principal (its deployment state lives in that principal's home folder, so
+  # don't deploy this target by hand). Same catalog as dev, but its own prefix
+  # (ci_bronze, "[ci] energy-daily"), so it never touches anyone's dev_<you>_ schemas.
+  # Not mode: development, which insists on a username in the prefix; the presets below
+  # give the same safety (paused schedules, development pipeline) under a fixed name.
+  ci:
+    presets:
+      name_prefix: "[ci] "
+      pipelines_development: true
+      trigger_pause_status: PAUSED
+      jobs_max_concurrent_runs: 1
+      tags:
+        env: ci
+    variables:
+      catalog: energy_dev
+
   prod:
     mode: production
     workspace:

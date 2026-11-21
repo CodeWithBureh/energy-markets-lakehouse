@@ -9,3 +9,4 @@ __pycache__/
 landing/
 .env
 *.nc
+.coverage

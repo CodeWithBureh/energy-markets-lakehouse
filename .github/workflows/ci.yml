@@ -1,40 +1,155 @@
 name: ci
 
+# Branch flow: feature branch -> PR into dev -> merge deploys the "ci" copy in energy_dev and
+# runs it end to end -> PR dev into main -> merge deploys prod and checks it.
+#
+#   pull request (into dev or main)  test, then bundle validate for ci and prod
+#   push to dev                      test, deploy -t ci, pipeline validate-only, run the
+#                                    daily job, data checks
+#   push to main                     test, deploy -t prod, pipeline validate-only, data checks
+#
+# Secrets: DATABRICKS_HOST, ALERT_EMAIL, DATABRICKS_CLIENT_ID/SECRET (prod service principal),
+# DEV_DATABRICKS_CLIENT_ID/SECRET (CI service principal, energy_dev only).
+
 on:
   pull_request:
+    branches: [dev, main]
   push:
-    branches: [main]
+    branches: [dev, main]
+  workflow_dispatch:
+    inputs:
+      seed_start_month:
+        description: "Dev only: backfill the ci copy from this month (YYYY-MM) first. Use on the first run."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# One deploy per branch at a time; superseded pull-request runs are cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+  BUNDLE_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+  PYTHON_VERSION: "3.12"           # matches serverless environment 4
 
 jobs:
+  promotion-guard:
+    # main only takes changes that went through dev (or an explicit hotfix/ branch).
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the source branch
+        if: github.head_ref != 'dev' && !startsWith(github.head_ref, 'hotfix/')
+        run: |
+          echo "::error::Pull requests into main must come from dev (or hotfix/*), not ${{ github.head_ref }}."
+          exit 1
+      - run: echo "Promoting ${{ github.head_ref }} to main"
+
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
       - run: pip install -e ".[dev]"
       - run: ruff check src tests
-      - run: pytest -q
+      - run: pytest -q --cov=energy_lakehouse --cov-report=term-missing
+      - name: Build the wheel and smoke-test its entry points
+        # The jobs call these entry points; a packaging mistake would only show on Databricks.
+        run: |
+          python -m build --wheel
+          python -m venv /tmp/wheel-env
+          /tmp/wheel-env/bin/pip install -q dist/*.whl
+          /tmp/wheel-env/bin/ingest --help > /dev/null
+          /tmp/wheel-env/bin/plan_backfill --help > /dev/null
+          /tmp/wheel-env/bin/check_lakehouse --help > /dev/null
 
-  deploy-prod:
-    # Deploy to Azure Databricks only from main, after tests pass.
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  validate:
+    # Pull requests from forks get no secrets, so only same-repo pull requests validate.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     needs: test
     runs-on: ubuntu-latest
-    environment: prod            # add a required reviewer in repo settings if you like
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ci, prod]
     env:
-      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-      # Prefer OAuth machine-to-machine with a service principal:
-      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
-      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-      BUNDLE_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+      DATABRICKS_CLIENT_ID: ${{ matrix.target == 'prod' && secrets.DATABRICKS_CLIENT_ID || secrets.DEV_DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ matrix.target == 'prod' && secrets.DATABRICKS_CLIENT_SECRET || secrets.DEV_DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: databricks/setup-cli@v1.26.0
+      - run: databricks bundle validate -t ${{ matrix.target }}
+
+  deploy-dev:
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: test
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 120
+    env:
+      DATABRICKS_CLIENT_ID: ${{ secrets.DEV_DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DEV_DATABRICKS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install build
-      - uses: databricks/setup-cli@main
+      - uses: databricks/setup-cli@v1.26.0
+      - run: databricks bundle validate -t ci
+      - run: databricks bundle deploy -t ci
+      - name: Pipeline validate-only update (checks the bronze/silver/gold code, processes no data)
+        run: databricks bundle run -t ci energy_pipeline --validate-only
+      - name: Seed history (manual runs only)
+        if: github.event_name == 'workflow_dispatch' && inputs.seed_start_month != ''
+        run: databricks bundle run -t ci energy_backfill --params "start_month=${{ inputs.seed_start_month }},end_month=current"
+      - name: Run the daily job end to end
+        # bundle run fails on a FAILED run; this also catches SUCCESS_WITH_FAILURES.
+        run: |
+          databricks bundle run -t ci energy_daily
+          job_id=$(databricks bundle summary -t ci -o json | jq -r '.resources.jobs.energy_daily.id')
+          state=$(databricks jobs list-runs --job-id "$job_id" --limit 1 -o json | jq -r '.[0].state.result_state')
+          echo "energy_daily finished: $state"
+          if [ "$state" != "SUCCESS" ]; then
+            echo "::error::energy_daily finished $state; see the run in Databricks"
+            exit 1
+          fi
+      - name: Data checks
+        run: databricks bundle run -t ci energy_checks
+
+  deploy-prod:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    environment: prod            # add a required reviewer in repo settings to gate prod
+    timeout-minutes: 60
+    env:
+      # OAuth machine-to-machine with the prod service principal
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install build
+      - uses: databricks/setup-cli@v1.26.0
       - run: databricks bundle validate -t prod
       - run: databricks bundle deploy -t prod
+      - name: Pipeline validate-only update
+        run: databricks bundle run -t prod energy_pipeline --validate-only
+      - name: Data checks (read-only)
+        # Prod isn't re-run here (the schedule owns that); this checks the deployed jobs can
+        # read prod and that the data the schedule produced is fresh and consistent.
+        run: databricks bundle run -t prod energy_checks

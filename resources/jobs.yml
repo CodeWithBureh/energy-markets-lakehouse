@@ -372,3 +372,39 @@ resources:
           pipeline_task:
             pipeline_id: ${resources.pipelines.energy_pipeline.id}
             full_refresh: false
+
+    # Read-only data checks (energy_lakehouse/checks.py): tables populated, current silver
+    # rows unique, GB and EU prices fresh, no incomplete settlement days, prices in range.
+    # CI runs it after every deploy, in the ci copy and in prod; fails if any required check does.
+    #
+    #   databricks bundle run -t prod energy_checks
+    energy_checks:
+      name: energy-checks
+      max_concurrent_runs: 1
+      timeout_seconds: 1200
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+      tags:
+        project: energy-markets-lakehouse
+      parameters:
+        - name: max_age_days                       # how stale GB/EU prices may be
+          default: "3"
+      environments:
+        - environment_key: ingest
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ../dist/*.whl
+      tasks:
+        - task_key: check_lakehouse
+          environment_key: ingest
+          timeout_seconds: 900
+          python_wheel_task:
+            package_name: energy_lakehouse
+            entry_point: check_lakehouse
+            parameters:
+              - --catalog=${var.catalog}
+              - --silver-schema=${resources.schemas.silver.name}
+              - --gold-schema=${resources.schemas.gold.name}
+              - --max-age-days={{job.parameters.max_age_days}}

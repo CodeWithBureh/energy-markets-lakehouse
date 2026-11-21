@@ -1,0 +1,14 @@
+# Weekly update PRs for the GitHub Actions and Python dependencies, opened against dev so
+# they go through the ci copy before reaching prod.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
