@@ -64,6 +64,14 @@ ELEXON_WIND_SOLAR_FORECAST_SCHEMA = """
                       psrType: STRING, quantity: DOUBLE, startTime: STRING,
                       settlementDate: STRING, settlementPeriod: BIGINT>>
 """
+ELEXON_DEMAND_FORECAST_DAILY_SCHEMA = """
+    data ARRAY<STRUCT<dataset: STRING, publishTime: STRING, forecastDate: STRING,
+                      demand: DOUBLE>>
+"""
+WEATHER_FORECAST_SCHEMA = """
+    issued_utc STRING, latitude DOUBLE, longitude DOUBLE, valid_time_utc STRING,
+    wind_speed_100m_ms DOUBLE, temp_c DOUBLE, solar_irradiance_wm2 DOUBLE
+"""
 GAS_SAP_SCHEMA = """
     gas_day STRING, sap_p_kwh DOUBLE, applicable_at_local STRING, generated_at_local STRING,
     quality_indicator STRING
@@ -137,6 +145,8 @@ _elexon_table("wind_forecast", ELEXON_WIND_FORECAST_SCHEMA,
               "Raw Elexon wind generation forecasts (WINDFOR), one file per publish day.")
 _elexon_table("wind_solar_forecast", ELEXON_WIND_SOLAR_FORECAST_SCHEMA,
               "Raw Elexon wind and solar forecasts (DGWS), one file per publish day.")
+_elexon_table("demand_forecast_daily", ELEXON_DEMAND_FORECAST_DAILY_SCHEMA,
+              "Raw Elexon 2-14 day national demand forecasts (NDFD), one file per publish day.")
 
 
 @dlt.table(
@@ -179,6 +189,15 @@ def gas_sap():
 )
 def gas_ttf():
     return autoload("gas/ttf", "json", GAS_TTF_SCHEMA, pathGlobFilter="*.jsonl")
+
+
+@dlt.table(
+    name=f"{BRONZE}.weather_forecast_gb_hourly",
+    comment="Open-Meteo hourly forecasts at 1-degree points over GB, one file per daily fetch.",
+)
+def weather_forecast_gb_hourly():
+    return autoload("weather_forecast/gb_hourly", "json", WEATHER_FORECAST_SCHEMA,
+                    pathGlobFilter="*.jsonl")
 
 
 @dlt.table(
