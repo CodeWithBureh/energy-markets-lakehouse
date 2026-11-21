@@ -110,6 +110,9 @@ jobs:
       - run: databricks bundle validate -t ci
       - run: databricks bundle deploy -t ci
       - name: Pipeline validate-only update (checks the bronze/silver/gold code, processes no data)
+        # Skipped on seed runs: Auto Loader can't infer a schema from an empty landing volume,
+        # and the backfill's own pipeline refresh checks the code anyway.
+        if: github.event_name != 'workflow_dispatch' || inputs.seed_start_month == ''
         run: databricks bundle run -t ci energy_pipeline --validate-only
       - name: Seed history (manual runs only)
         if: github.event_name == 'workflow_dispatch' && inputs.seed_start_month != ''
