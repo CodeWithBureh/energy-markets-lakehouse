@@ -11,7 +11,7 @@ designed to run for **under £75/month** (expected £30–45).
 ```mermaid
 flowchart LR
   subgraph Sources[Free sources]
-    E[Elexon Insights API<br/>JSON, half-hourly]
+    E[Elexon Insights API<br/>JSON: prices, demand,<br/>generation, forecasts]
     X[ENTSO-E A44<br/>XML, 15/60-min]
     F[FRED<br/>JSON, daily/monthly]
     S[yfinance<br/>daily OHLCV]
@@ -63,9 +63,13 @@ sql/                           dashboard and FinOps starter queries
 ## Data model (gold)
 
 * `dim_date` (with expected settlement periods), `dim_company`, `dim_fx_daily`
-* `fact_gb_half_hourly`: system price, imbalance, generation mix, wind/gas share, weather
+* `fact_gb_half_hourly`: system price, market index price (APX), imbalance, demand and
+  residual demand, generation mix, wind/gas share, weather
+* `fact_gb_day_ahead_forecasts`: demand, wind and solar forecasts per settlement period, as
+  published before the delivery day began (no look-ahead, so usable as model features)
 * `fact_eu_day_ahead_hourly`: FR, NL, BE, NO2, DK1 and IE prices in EUR and GBP
-* `fact_market_daily`: daily GB price stats, neighbour prices, GB–FR spread, gas, FX, weather
+* `fact_market_daily`: daily GB price stats, market index price, demand, neighbour prices,
+  GB–FR spread, gas, FX, weather
 * `fact_stock_returns_daily`: returns per ticker
 * `mart_stocks_vs_market`: returns next to power/gas moves with rolling 60-day correlations
 * `dq_settlement_period_completeness`: any day with missing or duplicate periods
