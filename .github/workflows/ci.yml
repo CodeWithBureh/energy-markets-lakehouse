@@ -1,15 +1,18 @@
 name: ci
 
 # Branch flow: feature branch -> PR into dev -> merge deploys the "ci" copy in energy_dev and
-# runs it end to end -> PR dev into main -> merge deploys prod and checks it.
+# runs it end to end -> if that passes, CI opens a dev -> main PR that merges itself once
+# main's checks pass -> the merge deploys prod and checks it.
 #
 #   pull request (into dev or main)  test, then bundle validate for ci and prod
 #   push to dev                      test, deploy -t ci, pipeline validate-only, run the
-#                                    daily job, data checks
+#                                    daily job, data checks, then promote (dev -> main PR
+#                                    with auto-merge)
 #   push to main                     test, deploy -t prod, pipeline validate-only, data checks
 #
 # Secrets: DATABRICKS_HOST, ALERT_EMAIL, DATABRICKS_CLIENT_ID/SECRET (prod service principal),
-# DEV_DATABRICKS_CLIENT_ID/SECRET (CI service principal, energy_dev only).
+# DEV_DATABRICKS_CLIENT_ID/SECRET (CI service principal, energy_dev only), PROMOTE_TOKEN
+# (fine-grained GitHub token that opens and merges the promotion PR).
 
 on:
   pull_request:
@@ -110,6 +113,9 @@ jobs:
       - run: databricks bundle validate -t ci
       - run: databricks bundle deploy -t ci
       - name: Pipeline validate-only update (checks the bronze/silver/gold code, processes no data)
+        # Skipped on seed runs: Auto Loader can't infer a schema from an empty landing volume,
+        # and the backfill's own pipeline refresh checks the code anyway.
+        if: github.event_name != 'workflow_dispatch' || inputs.seed_start_month == ''
         run: databricks bundle run -t ci energy_pipeline --validate-only
       - name: Seed history (manual runs only)
         if: github.event_name == 'workflow_dispatch' && inputs.seed_start_month != ''
@@ -127,6 +133,50 @@ jobs:
           fi
       - name: Data checks
         run: databricks bundle run -t ci energy_checks
+
+  promote:
+    # The ci copy passed: open (or reuse) the dev -> main pull request and set it to merge
+    # itself once main's required checks pass. That merge is a push to main: deploy-prod.
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    env:
+      # Not GITHUB_TOKEN: pull requests and merges made with it don't trigger workflows, so
+      # main's checks and the prod deploy would never run. Fine-grained token for this repo
+      # only, with Contents and Pull requests read/write.
+      GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Open or reuse the promotion pull request and enable auto-merge
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::PROMOTE_TOKEN is not set; see the README's CI/CD section"
+            exit 1
+          fi
+          if [ "$(git rev-list --count origin/main..origin/dev)" = 0 ]; then
+            echo "main already has everything on dev"
+            exit 0
+          fi
+          pr=$(gh pr list --base main --head dev --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then
+            {
+              echo "Opened automatically: the ci copy deployed and passed its checks in"
+              echo "[run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+              echo "It merges itself once main's required checks pass, which deploys prod."
+              echo
+              echo "Commits:"
+              git log --no-merges --format='- %s (%h)' origin/main..origin/dev
+            } > body.md
+            gh pr create --base main --head dev --title "Promote dev to main" --body-file body.md
+            pr=$(gh pr list --base main --head dev --state open --json number --jq '.[0].number')
+          else
+            echo "Reusing pull request #$pr; it now includes ${GITHUB_SHA::7}"
+          fi
+          # A merge commit, not squash: dev and main keep the same history, so the next
+          # promotion has no conflicts.
+          gh pr merge "$pr" --auto --merge
 
   deploy-prod:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
