@@ -3,7 +3,7 @@
 **Do power, gas and weather moves show up in UK energy stocks?**
 
 This is an Azure Databricks lakehouse that ingests GB balancing-market data (Elexon), European
-day-ahead prices (ENTSO-E), gas and FX (FRED), share prices for London-listed energy companies
+day-ahead prices (ENTSO-E), daily gas prices (National Gas SAP, TTF), US gas and FX (FRED), share prices for London-listed energy companies
 and ERA5 weather reanalysis (Copernicus). It models them into a medallion architecture and
 serves a dashboard. Everything is deployed as code with Databricks Asset Bundles and is
 designed to run for **under £75/month** (expected £30–45).
@@ -14,7 +14,8 @@ flowchart LR
     E[Elexon Insights API<br/>JSON: prices, demand,<br/>generation, forecasts]
     X[ENTSO-E A44<br/>XML, 15/60-min]
     F[FRED<br/>JSON, daily/monthly]
-    S[yfinance<br/>daily OHLCV]
+    S[yfinance<br/>daily OHLCV, TTF gas]
+    NG[National Gas<br/>CSV, daily SAP]
     W[Copernicus ERA5<br/>NetCDF grids, hourly]
   end
   subgraph Jobs[Lakeflow Jobs - serverless]
@@ -27,7 +28,7 @@ flowchart LR
     G[(gold<br/>star schema + marts)]
   end
   D[AI/BI dashboard + Genie]
-  E & X & F & S & W --> I --> L --> B --> SV --> G --> D
+  E & X & F & S & NG & W --> I --> L --> B --> SV --> G --> D
 ```
 
 ## Why it's interesting (the hard parts)
@@ -70,7 +71,7 @@ sql/                           dashboard and FinOps starter queries
   a wind forecast corrected for WINDFOR's overshoot (factor fitted on days D-365 to D-2)
 * `fact_eu_day_ahead_hourly`: FR, NL, BE, NO2, DK1 and IE prices in EUR and GBP
 * `fact_market_daily`: daily GB price stats, market index price, demand, neighbour prices,
-  GB–FR spread, gas, FX, weather
+  GB–FR spread, gas (SAP, TTF, Henry Hub, monthly EU), FX, weather
 * `fact_stock_returns_daily`: returns per ticker
 * `mart_stocks_vs_market`: returns next to power/gas moves with rolling 60-day correlations
 * `dq_settlement_period_completeness`: any day with missing or duplicate periods
@@ -84,7 +85,8 @@ sql/                           dashboard and FinOps starter queries
 | ENTSO-E | Register at transparency.entsoe.eu, then email transparency@entsoe.eu for "Restful API access" | `entsoe-token` |
 | FRED | Request a key at fred.stlouisfed.org | `fred-api-key` |
 | Copernicus CDS | Create an account, copy the API key, **accept the ERA5 licence** on the dataset page | `cds-api-key` |
-| yfinance | Nothing (unofficial; swap for Alpaca/Twelve Data if it breaks) | – |
+| yfinance | Nothing (unofficial; swap for Alpaca/Twelve Data if it breaks). Also supplies TTF gas (`TTF=F`) | – |
+| National Gas data portal | Nothing. SAP is data item `PUBOB603` | – |
 
 ### 2. Local development
 ```bash
@@ -266,7 +268,7 @@ databricks bundle run -t prod energy_backfill --params "months=2024-03 2024-10,i
 databricks bundle run -t prod energy_backfill --params start_month=2024-01,end_month=current,weather_only=true
 ```
 `weather_only=true` backfills ERA5 alone and skips the market sources (Elexon, ENTSO-E, FRED,
-stocks). Expect it to be slow: the Copernicus queue can take up to an hour per month.
+stocks, gas). Expect it to be slow: the Copernicus queue can take up to an hour per month.
 If some months fail, open the run and click **Repair run**: only the failed months rerun.
 
 ### 5. Prod
@@ -412,5 +414,5 @@ shut them down.
 * **ERA5 request refused**: accept the dataset licence on the CDS website (one-off).
 
 Data: Contains BMRS data © Elexon Limited copyright and database right. ENTSO-E
-Transparency Platform. FRED®, Federal Reserve Bank of St. Louis. Copernicus Climate Change
+Transparency Platform. FRED®, Federal Reserve Bank of St. Louis. Gas SAP: National Gas Transmission. Copernicus Climate Change
 Service (ERA5).

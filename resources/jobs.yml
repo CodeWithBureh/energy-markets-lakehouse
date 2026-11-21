@@ -1,5 +1,5 @@
 # Two scheduled jobs and an on-demand backfill job, all on serverless compute.
-#  - energy_daily:  ingest Elexon / ENTSO-E / FRED / stocks, then refresh the pipeline
+#  - energy_daily:  ingest Elexon / ENTSO-E / FRED / stocks / gas, then refresh the pipeline
 #  - energy_weekly_weather: pull a week of ERA5 (CDS queues can be slow, so weekly keeps
 #    the billed waiting time down)
 #  - energy_backfill: on-demand history backfill, month by month (see below)
@@ -106,6 +106,22 @@ resources:
               - --end={{job.parameters.end}}
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
+        - task_key: ingest_gas
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
+          environment_key: ingest
+          timeout_seconds: 600
+          max_retries: 2
+          min_retry_interval_millis: 120000
+          python_wheel_task:
+            package_name: energy_lakehouse
+            entry_point: ingest
+            parameters:
+              - --source=gas
+              - --start={{job.parameters.start}}
+              - --end={{job.parameters.end}}
+              - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
+
         - task_key: refresh_pipeline
           # One flaky source shouldn't stop the others from flowing through.
           run_if: AT_LEAST_ONE_SUCCESS
@@ -114,6 +130,7 @@ resources:
             - task_key: ingest_entsoe
             - task_key: ingest_fred
             - task_key: ingest_stocks
+            - task_key: ingest_gas
           pipeline_task:
             pipeline_id: ${resources.pipelines.energy_pipeline.id}
             full_refresh: false
@@ -167,7 +184,7 @@ resources:
     #   databricks bundle run -t prod energy_backfill --params start_month=2024-01,end_month=current
     #   databricks bundle run -t prod energy_backfill --params "months=2024-03 2024-10"
     #   ...add include_weather=true for ERA5 (slow: the CDS queue can take an hour a month)
-    #   ...or weather_only=true for ERA5 alone (skips Elexon, ENTSO-E, FRED and stocks)
+    #   ...or weather_only=true for ERA5 alone (skips Elexon, ENTSO-E, FRED, stocks and gas)
     #
     # If some months fail, use "Repair run" in the Jobs UI: it reruns only the failed
     # iterations, then the pipeline refresh.
@@ -325,6 +342,31 @@ resources:
                   - --end={{input.end}}
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
+        - task_key: backfill_gas
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
+          depends_on:
+            - task_key: plan_months
+            - task_key: markets_requested
+              outcome: "true"
+          for_each_task:
+            inputs: "{{tasks.plan_months.values.months}}"
+            concurrency: 1
+            task:
+              task_key: backfill_gas_month
+              environment_key: ingest
+              timeout_seconds: 600
+              max_retries: 2
+              min_retry_interval_millis: 120000
+              python_wheel_task:
+                package_name: energy_lakehouse
+                entry_point: ingest
+                parameters:
+                  - --source=gas
+                  - --start={{input.start}}
+                  - --end={{input.end}}
+                  - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
+
         - task_key: weather_requested
           depends_on:
             - task_key: plan_months
@@ -368,6 +410,7 @@ resources:
             - task_key: backfill_entsoe
             - task_key: backfill_fred
             - task_key: backfill_stocks
+            - task_key: backfill_gas
             - task_key: backfill_era5
           pipeline_task:
             pipeline_id: ${resources.pipelines.energy_pipeline.id}
