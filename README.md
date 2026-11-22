@@ -297,7 +297,7 @@ Add `refetch=true` to force a full re-download (e.g. after fixing a parser).
 | Stocks | 7 days |
 | FRED | 45 days (monthly EU gas lands late) |
 | ERA5 | 120 days from the month's first day (ERA5T is replaced by final ERA5) |
-| Weather forecast archive | as soon as it lands (only issues whose week is over) |
+| Weather forecast archive | as soon as it lands (only issues at least 2 days old) |
 
 The settle periods live in `SETTLE_DAYS` in `src/energy_lakehouse/landing.py`. The weather
 forecast is new every run, so it is never skipped.
@@ -307,12 +307,14 @@ market backfill) rebuilds past outlook issues from Open-Meteo's
 [Previous Runs API](https://open-meteo.com/en/docs/previous-runs-api): for each day since
 14 Mar 2024, the forecast for D+1 to D+7 as it stood at 07:40 UK time, using for each hour the
 newest forecast made by then. The archive keeps forecasts up to 7 days before valid time, so
-late on D+7 it uses one made up to 16 hours after the issue (`lead_shortfall_hours`). Issues
-less than 8 days old are left to the live fetch. The whole history is about 11,000 calls by
+late on D+7 it uses one made up to 16 hours after the issue (`lead_shortfall_hours`). An issue
+is rebuilt 2 days on, once every forecast it uses has been made (the API also returns values
+for runs not made yet, so a younger issue isn't trusted); on days with a live fetch, the
+outlook uses that instead. The whole history is about 11,000 calls by
 Open-Meteo's count against a free limit of 10,000 a day, so the first full backfill can stop
 partway with HTTP 429; rerun it the next day and the months already landed are skipped.
-After that, `energy_daily` adds each issue once its week is over, refetching the last 7 so a
-missed run catches up.
+After that, `energy_daily` adds each issue 2 days on, refetching the issues from 14 to 2 days
+ago so a missed run catches up.
 
 ### 5. Prod
 Pushes to `main` run the tests, deploy prod as the service principal (step 3b.7), then run a
