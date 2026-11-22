@@ -465,6 +465,33 @@ upsert("weather_forecast_gb_hourly", "weather_forecast_gb_hourly_updates",
        cluster_by=["issued_utc"])
 
 
+@dlt.view(name="weather_forecast_gb_hourly_archive_updates")
+@dlt.expect_or_drop("wind_present", "wind_speed_100m_ms IS NOT NULL")
+@dlt.expect("plausible_wind", "wind_speed_100m_ms BETWEEN 0 AND 80")
+def weather_forecast_gb_hourly_archive_updates():
+    return bronze_stream("weather_forecast_gb_hourly_archive").select(
+        F.col("issued_utc").cast("timestamp").alias("issued_utc"),
+        F.col("valid_time_utc").cast("timestamp").alias("valid_time_utc"),
+        F.round("latitude", 2).alias("latitude"),
+        F.round("longitude", 2).alias("longitude"),
+        "wind_speed_100m_ms",
+        "temp_c",
+        F.col("lead_days").cast("int").alias("lead_days"),
+        F.col("lead_shortfall_hours").cast("int").alias("lead_shortfall_hours"),
+        "_file_modified_at",
+        "_source_file",
+    )
+
+
+upsert("weather_forecast_gb_hourly_archive", "weather_forecast_gb_hourly_archive_updates",
+       keys=["issued_utc", "valid_time_utc", "latitude", "longitude"],
+       comment="Past forecast issues rebuilt from Open-Meteo's Previous Runs API: what the "
+               "07:40 UK fetch would have returned each day. lead_days = how far ahead the "
+               "forecast was made; lead_shortfall_hours > 0 where it was made after the issue "
+               "time (late on D+7, as the API keeps 7 days of lead).",
+       cluster_by=["issued_utc"])
+
+
 upsert("era5_gb_grid_hourly", "era5_gb_grid_hourly_updates",
        keys=["valid_time_utc", "latitude", "longitude"],
        comment="ERA5 hourly weather per 0.25-degree grid cell over GB, in friendly units.",

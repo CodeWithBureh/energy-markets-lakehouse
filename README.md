@@ -72,8 +72,11 @@ sql/                           dashboard and FinOps starter queries
   a wind forecast corrected for WINDFOR's overshoot (factor fitted on days D-365 to D-2)
 * `gb_wind_power_curve`: metered wind (MW) by GB-average 100 m wind speed, last 365 days
 * `fact_gb_week_ahead_outlook`: per daily forecast issue, the next 7 days' demand (NDFD),
-  wind (WINDFOR or weather forecast x power curve), residual demand, weather and latest gas.
-  `sql/week_ahead_report.sql` turns it into a daily price outlook
+  wind (WINDFOR where it covers the hour, else weather forecast x power curve), residual
+  demand, weather and latest gas. `sql/week_ahead_report.sql` turns it into a daily price
+  outlook. Issues from Mar 2024 until the live fetch started are rebuilt from Open-Meteo's
+  archive (`is_archived_forecast`), so `sql/week_ahead_backtest.sql` can score the report
+  against actual prices by days ahead
 * `fact_eu_day_ahead_hourly`: FR, NL, BE, NO2, DK1 and IE prices in EUR and GBP
 * `fact_market_daily`: daily GB price stats, market index price, demand, neighbour prices,
   GB–FR spread, gas (SAP, TTF, Henry Hub, monthly EU), FX, weather
@@ -274,7 +277,7 @@ databricks bundle run -t prod energy_backfill --params "months=2024-03 2024-10,i
 databricks bundle run -t prod energy_backfill --params start_month=2024-01,end_month=current,weather_only=true
 ```
 `weather_only=true` backfills ERA5 alone and skips the market sources (Elexon, ENTSO-E, FRED,
-stocks, gas). Expect it to be slow: the Copernicus queue can take up to an hour per month.
+stocks, gas, the forecast archive). Expect it to be slow: the Copernicus queue can take up to an hour per month.
 If some months fail, open the run and click **Repair run**: only the failed months rerun.
 
 **Reruns only fetch what's missing or can still change.** Before each request the ingest looks
@@ -294,9 +297,20 @@ Add `refetch=true` to force a full re-download (e.g. after fixing a parser).
 | Stocks | 7 days |
 | FRED | 45 days (monthly EU gas lands late) |
 | ERA5 | 120 days from the month's first day (ERA5T is replaced by final ERA5) |
+| Weather forecast archive | as soon as it lands (only issues whose week is over) |
 
 The settle periods live in `SETTLE_DAYS` in `src/energy_lakehouse/landing.py`. The weather
 forecast is new every run, so it is never skipped.
+
+**The weather forecast archive** (`weather_forecast_archive`, part of every market backfill)
+rebuilds past outlook issues from Open-Meteo's
+[Previous Runs API](https://open-meteo.com/en/docs/previous-runs-api): for each day since
+14 Mar 2024, the forecast for D+1 to D+7 as it stood at 07:40 UK time, using for each hour the
+newest forecast made by then. The archive keeps forecasts up to 7 days before valid time, so
+late on D+7 it uses one made up to 16 hours after the issue (`lead_shortfall_hours`). Issues
+less than 8 days old are left to the live fetch. The whole history is about 11,000 calls by
+Open-Meteo's count against a free limit of 10,000 a day, so the first full backfill can stop
+partway with HTTP 429; rerun it the next day and the months already landed are skipped.
 
 ### 5. Prod
 Pushes to `main` run the tests, deploy prod as the service principal (step 3b.7), then run a
