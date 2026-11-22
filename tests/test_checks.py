@@ -25,6 +25,13 @@ def test_era5_checks_are_optional_but_market_checks_are_required():
     assert all(c.required for n, c in built.items() if "fresh" in n)
 
 
+def test_week_ahead_checks_are_required():
+    built = {c.name: c for c in build_checks("c", "s", "g", 3, TODAY)}
+    for t in ("silver.weather_forecast_gb_hourly", "silver.weather_forecast_gb_hourly_archive",
+              "gold.fact_gb_week_ahead_outlook"):
+        assert built[f"{t} has rows"].required
+
+
 def test_uniqueness_checks_only_look_at_current_scd2_rows():
     unique = [c for c in build_checks("c", "s", "g", 3, TODAY) if "unique" in c.name]
     assert len(unique) == len(checks.SILVER_KEYS)

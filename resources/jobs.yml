@@ -138,6 +138,25 @@ resources:
               - --source=weather_forecast
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
+        - task_key: ingest_weather_forecast_archive
+          # Each day's issue is rebuilt from the archive once its week is over (8 days on), so
+          # the outlook backtest keeps up. The default window refetches the last 7 such issues,
+          # catching up after missed runs: a few calls a day against Open-Meteo's 10,000.
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
+          environment_key: ingest
+          timeout_seconds: 600
+          max_retries: 2
+          min_retry_interval_millis: 120000
+          python_wheel_task:
+            package_name: energy_lakehouse
+            entry_point: ingest
+            parameters:
+              - --source=weather_forecast_archive
+              - --start={{job.parameters.start}}
+              - --end={{job.parameters.end}}
+              - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
+
         - task_key: refresh_pipeline
           # One flaky source shouldn't stop the others from flowing through.
           run_if: AT_LEAST_ONE_SUCCESS
@@ -148,6 +167,7 @@ resources:
             - task_key: ingest_stocks
             - task_key: ingest_gas
             - task_key: ingest_weather_forecast
+            - task_key: ingest_weather_forecast_archive
           pipeline_task:
             pipeline_id: ${resources.pipelines.energy_pipeline.id}
             full_refresh: false
