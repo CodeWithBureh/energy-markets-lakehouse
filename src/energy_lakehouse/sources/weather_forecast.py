@@ -36,6 +36,10 @@ MAX_LEAD_DAYS = 7                      # the API keeps forecasts up to 7 days be
 OUTLOOK_DAYS = 7                       # targets D+1..D+7, as gold.fact_gb_week_ahead_outlook
 ISSUE_LOCAL_TIME = time(7, 40)         # energy_daily's schedule
 ARCHIVE_SINCE = date(2024, 3, 14)      # first day with every lead up to 7 days
+# Days after the issue before it is rebuilt. Every forecast an issue uses is made by 23:40 on
+# its own day (the 16-hour shortfall late on D+7); the API also returns values for runs not
+# made yet, so allow a day for the last run to be published before trusting them.
+ARCHIVE_DELAY_DAYS = 2
 LONDON = ZoneInfo("Europe/London")
 
 
