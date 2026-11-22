@@ -45,7 +45,8 @@ def test_entsoe_fetches_once_per_zone_and_lands_one_file_per_day(tmp_path, monke
     monkeypatch.setattr(config, "ENTSOE_ZONES", {"FR": "10YFR-RTE------C"})
 
     # The fixture covers delivery day 12 Nov (CET), which starts at 23:00 UTC on the 11th.
-    rep = cli.run_entsoe(str(tmp_path), date(2026, 11, 11), date(2026, 11, 12), "ts", None)
+    rep = cli.run_entsoe(cli.Lander(str(tmp_path), "ts"), date(2026, 11, 11), date(2026, 11, 12),
+                         None)
 
     assert calls == [("10YFR-RTE------C", date(2026, 11, 11), date(2026, 11, 12))]
     assert [Path(f).parent.name for f in rep.files] == ["12"]   # .../2026/11/12/
@@ -58,7 +59,7 @@ def test_era5_end_is_clipped_to_the_publication_lag(tmp_path, monkeypatch):
 
     seen = []
     monkeypatch.setattr(cli, "today_london", lambda: date(2026, 11, 19))
-    monkeypatch.setattr(cli, "run_era5", lambda root, start, end, ts, scope:
+    monkeypatch.setattr(cli, "run_era5", lambda lander, start, end, scope:
                         seen.append((start, end)) or cli.RunReport("era5"))
 
     # Backfill of the current month: stop 6 days back instead of asking for unpublished days.

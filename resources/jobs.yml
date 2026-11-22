@@ -202,6 +202,8 @@ resources:
     #   databricks bundle run -t prod energy_backfill --params "months=2024-03 2024-10"
     #   ...add include_weather=true for ERA5 (slow: the CDS queue can take an hour a month)
     #   ...or weather_only=true for ERA5 alone (skips Elexon, ENTSO-E, FRED, stocks and gas)
+    #   Months already landed and settled are skipped (rerunning only fills gaps); add
+    #   refetch=true to download everything again.
     #
     # If some months fail, use "Repair run" in the Jobs UI: it reruns only the failed
     # iterations, then the pipeline refresh.
@@ -224,6 +226,8 @@ resources:
         - name: include_weather
           default: "false"
         - name: weather_only                       # ERA5 only; implies include_weather
+          default: "false"
+        - name: refetch                            # true: re-download months already landed
           default: "false"
       environments:
         - environment_key: ingest
@@ -280,6 +284,7 @@ resources:
                   - --source=elexon
                   - --start={{input.start}}
                   - --end={{input.end}}
+                  - --refetch={{job.parameters.refetch}}
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: backfill_entsoe
@@ -305,6 +310,7 @@ resources:
                   - --source=entsoe
                   - --start={{input.start}}
                   - --end={{input.end}}
+                  - --refetch={{job.parameters.refetch}}
                   - --secret-scope=${var.secret_scope}
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
@@ -331,6 +337,7 @@ resources:
                   - --source=fred
                   - --start={{input.start}}
                   - --end={{input.end}}
+                  - --refetch={{job.parameters.refetch}}
                   - --secret-scope=${var.secret_scope}
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
@@ -357,6 +364,7 @@ resources:
                   - --source=stocks
                   - --start={{input.start}}
                   - --end={{input.end}}
+                  - --refetch={{job.parameters.refetch}}
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: backfill_gas
@@ -382,6 +390,7 @@ resources:
                   - --source=gas
                   - --start={{input.start}}
                   - --end={{input.end}}
+                  - --refetch={{job.parameters.refetch}}
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: weather_requested
@@ -414,6 +423,7 @@ resources:
                   - --source=era5
                   - --start={{input.start}}
                   - --end={{input.end}}
+                  - --refetch={{job.parameters.refetch}}
                   - --secret-scope=${var.secret_scope}
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 

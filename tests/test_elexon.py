@@ -82,7 +82,7 @@ def test_run_elexon_lands_every_dataset_per_day(tmp_path, monkeypatch):
         return fetch
 
     monkeypatch.setattr(elexon, "DATASETS", {n: fake(n) for n in elexon.DATASETS})
-    rep = cli.run_elexon(str(tmp_path), date(2026, 11, 18), date(2026, 11, 19), "ts")
+    rep = cli.run_elexon(cli.Lander(str(tmp_path), "ts"), date(2026, 11, 18), date(2026, 11, 19))
 
     n = len(elexon.DATASETS)
     assert len(seen) == 2 * n

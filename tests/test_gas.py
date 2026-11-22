@@ -68,7 +68,7 @@ def test_run_gas_lands_sap_and_ttf_and_survives_one_failure(tmp_path, monkeypatc
     monkeypatch.setattr(gas, "fetch_ttf", broken_ttf)
     from datetime import date
 
-    rep = cli.run_gas(str(tmp_path), date(2026, 11, 14), date(2026, 11, 20), "T1")
+    rep = cli.run_gas(cli.Lander(str(tmp_path), "T1"), date(2026, 11, 14), date(2026, 11, 20))
     assert len(rep.files) == 1 and "gas" in rep.files[0] and "sap" in rep.files[0]
     assert rep.errors == ["ttf: Yahoo down"]
 

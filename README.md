@@ -277,6 +277,27 @@ databricks bundle run -t prod energy_backfill --params start_month=2024-01,end_m
 stocks, gas). Expect it to be slow: the Copernicus queue can take up to an hour per month.
 If some months fail, open the run and click **Repair run**: only the failed months rerun.
 
+**Reruns only fetch what's missing or can still change.** Before each request the ingest looks
+in the landing zone. A partition landed after its source stopped revising it is skipped
+without downloading. A download byte-identical to the last landed file is not written. So a
+backfill rerun fills gaps, and the daily job's overlapping windows don't land duplicates.
+Add `refetch=true` to force a full re-download (e.g. after fixing a parser).
+
+| Data | Treated as final after |
+|---|---|
+| Elexon forecasts (dated by publish day) | the publish day has ended |
+| Elexon demand outturn, market index | 2 days |
+| Elexon generation by fuel | 3 days |
+| Elexon system prices | 30 days (settlement runs) |
+| ENTSO-E day-ahead | 2 days |
+| Gas (SAP, TTF) | 3 days |
+| Stocks | 7 days |
+| FRED | 45 days (monthly EU gas lands late) |
+| ERA5 | 120 days from the month's first day (ERA5T is replaced by final ERA5) |
+
+The settle periods live in `SETTLE_DAYS` in `src/energy_lakehouse/landing.py`. The weather
+forecast is new every run, so it is never skipped.
+
 ### 5. Prod
 Pushes to `main` run the tests, deploy prod as the service principal (step 3b.7), then run a
 validate-only pipeline update and `energy_checks` (see CI/CD flow).
