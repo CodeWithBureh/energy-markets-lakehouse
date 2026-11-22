@@ -246,6 +246,25 @@ upsert("gb_wind_solar_forecast", "gb_wind_solar_forecast_updates",
        cluster_by=["settlement_date"])
 
 
+@dlt.view(name="gb_demand_forecast_daily_updates")
+@dlt.expect_or_drop("demand_present", "demand_peak_mw IS NOT NULL")
+@dlt.expect("plausible_peak", "demand_peak_mw BETWEEN 15000 AND 70000")
+def gb_demand_forecast_daily_updates():
+    return elexon_rows("elexon_demand_forecast_daily").select(
+        F.col("r.publishTime").cast("timestamp").alias("publish_time_utc"),
+        F.to_date("r.forecastDate").alias("forecast_date"),
+        F.col("r.demand").alias("demand_peak_mw"),
+        "_file_modified_at",
+        "_source_file",
+    )
+
+
+upsert("gb_demand_forecast_daily", "gb_demand_forecast_daily_updates",
+       keys=["publish_time_utc", "forecast_date"],
+       comment="GB national demand forecast 2-14 days ahead (NDFD): forecast daily PEAK "
+               "demand (MW), every published vintage.")
+
+
 # --- Europe (ENTSO-E) ------------------------------------------------------------------
 
 @dlt.view(name="eu_day_ahead_prices_updates")
@@ -420,6 +439,30 @@ def era5_gb_grid_hourly_updates():
         "_file_modified_at",
         "_source_file",
     )
+
+
+@dlt.view(name="weather_forecast_gb_hourly_updates")
+@dlt.expect_or_drop("wind_present", "wind_speed_100m_ms IS NOT NULL")
+@dlt.expect("plausible_wind", "wind_speed_100m_ms BETWEEN 0 AND 80")
+def weather_forecast_gb_hourly_updates():
+    return bronze_stream("weather_forecast_gb_hourly").select(
+        F.col("issued_utc").cast("timestamp").alias("issued_utc"),
+        F.col("valid_time_utc").cast("timestamp").alias("valid_time_utc"),
+        F.round("latitude", 2).alias("latitude"),
+        F.round("longitude", 2).alias("longitude"),
+        "wind_speed_100m_ms",
+        "temp_c",
+        "solar_irradiance_wm2",
+        "_file_modified_at",
+        "_source_file",
+    )
+
+
+upsert("weather_forecast_gb_hourly", "weather_forecast_gb_hourly_updates",
+       keys=["issued_utc", "valid_time_utc", "latitude", "longitude"],
+       comment="Open-Meteo hourly weather forecasts at 1-degree points over GB, every daily "
+               "fetch (issued_utc = fetch time).",
+       cluster_by=["issued_utc"])
 
 
 upsert("era5_gb_grid_hourly", "era5_gb_grid_hourly_updates",

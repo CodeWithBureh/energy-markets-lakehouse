@@ -34,7 +34,7 @@ from energy_lakehouse.timeutils import BRUSSELS, daterange, parse_iso_utc, today
 
 log = logging.getLogger("energy_lakehouse")
 
-SOURCES = ("elexon", "entsoe", "fred", "stocks", "era5", "gas")
+SOURCES = ("elexon", "entsoe", "fred", "stocks", "era5", "gas", "weather_forecast")
 
 
 @dataclass
@@ -62,6 +62,8 @@ def default_window(source: str, today: date) -> tuple[date, date]:
         return today - timedelta(days=14), today
     if source == "stocks":
         return today - timedelta(days=7), today
+    if source == "weather_forecast":
+        return today, today                         # always "now"; dates are ignored
     if source == "gas":
         # SAP for gas day D is final around 11:40 on D+1, and TTF settles after the close.
         return today - timedelta(days=7), today
@@ -215,6 +217,24 @@ def run_gas(root: str, start: date, end: date, ts: str) -> RunReport:
     return rep
 
 
+def run_weather_forecast(root: str, ts: str, today: date) -> RunReport:
+    from energy_lakehouse.sources import weather_forecast
+
+    rep = RunReport("weather_forecast")
+    t0 = time.monotonic()
+    try:
+        body = weather_forecast.fetch(make_session())
+        n = body.count(b"\n")
+        rep.rows_hint = n
+        rep.files.append(str(land_bytes(root, "weather_forecast", "gb_hourly", today, body,
+                                        "jsonl", ts)))
+        log.info("Weather forecast: %d point-hours in %.1fs", n, time.monotonic() - t0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Weather forecast failed after %.1fs: %s", time.monotonic() - t0, exc)
+        rep.errors.append(str(exc))
+    return rep
+
+
 def run_era5(root: str, start: date, end: date, ts: str, scope: str | None) -> RunReport:
     from energy_lakehouse.parsers.era5_netcdf import flatten_era5, to_parquet_bytes
     from energy_lakehouse.sources import era5
@@ -312,6 +332,11 @@ def main(argv: list[str] | None = None) -> int:
         rep = run_stocks(root, start, end, ts)
     elif args.source == "gas":
         rep = run_gas(root, start, end, ts)
+    elif args.source == "weather_forecast":
+        # A forecast is only ever "as of now": there is no history to backfill.
+        if args.start or args.end:
+            log.warning("weather_forecast ignores --start/--end; fetching the latest forecast")
+        rep = run_weather_forecast(root, ts, today_london())
     else:
         rep = run_era5(root, start, end, ts, args.secret_scope)
 
