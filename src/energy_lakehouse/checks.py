@@ -50,9 +50,8 @@ GOLD_TABLES = ["dim_date", "dim_company", "dim_fx_daily", "gb_weather_hourly",
                "fact_gb_week_ahead_outlook"]
 # Loaded only by the weekly ERA5 job or a weather backfill, so may be empty in a fresh copy.
 OPTIONAL_TABLES = {"era5_gb_grid_hourly", "gb_weather_hourly"}
-# Added in Nov 2026: warn only until prod has been backfilled, then make them required.
-OPTIONAL_TABLES |= {"gb_gas_sap_daily", "ttf_gas_daily", "gb_demand_forecast_daily",
-                    "weather_forecast_gb_hourly", "fact_gb_week_ahead_outlook"}
+# Open-Meteo has no history: these fill from daily runs only, so warn until prod has some.
+OPTIONAL_TABLES |= {"weather_forecast_gb_hourly", "fact_gb_week_ahead_outlook"}
 # Built from ERA5, so empty whenever ERA5 is.
 OPTIONAL_TABLES |= {"gb_wind_power_curve"}
 
