@@ -16,6 +16,7 @@ flowchart LR
     F[FRED<br/>JSON, daily/monthly]
     S[yfinance<br/>daily OHLCV, TTF gas]
     NG[National Gas<br/>CSV, daily SAP]
+    OM[Open-Meteo<br/>JSON, 9-day forecast]
     W[Copernicus ERA5<br/>NetCDF grids, hourly]
   end
   subgraph Jobs[Lakeflow Jobs - serverless]
@@ -28,7 +29,7 @@ flowchart LR
     G[(gold<br/>star schema + marts)]
   end
   D[AI/BI dashboard + Genie]
-  E & X & F & S & NG & W --> I --> L --> B --> SV --> G --> D
+  E & X & F & S & NG & OM & W --> I --> L --> B --> SV --> G --> D
 ```
 
 ## Why it's interesting (the hard parts)
@@ -69,6 +70,10 @@ sql/                           dashboard and FinOps starter queries
 * `fact_gb_day_ahead_forecasts`: demand, wind and solar forecasts per settlement period, as
   published before the delivery day began (no look-ahead, so usable as model features), plus
   a wind forecast corrected for WINDFOR's overshoot (factor fitted on days D-365 to D-2)
+* `gb_wind_power_curve`: metered wind (MW) by GB-average 100 m wind speed, last 365 days
+* `fact_gb_week_ahead_outlook`: per daily forecast issue, the next 7 days' demand (NDFD),
+  wind (WINDFOR or weather forecast x power curve), residual demand, weather and latest gas.
+  `sql/week_ahead_report.sql` turns it into a daily price outlook
 * `fact_eu_day_ahead_hourly`: FR, NL, BE, NO2, DK1 and IE prices in EUR and GBP
 * `fact_market_daily`: daily GB price stats, market index price, demand, neighbour prices,
   GB–FR spread, gas (SAP, TTF, Henry Hub, monthly EU), FX, weather
@@ -87,6 +92,7 @@ sql/                           dashboard and FinOps starter queries
 | Copernicus CDS | Create an account, copy the API key, **accept the ERA5 licence** on the dataset page | `cds-api-key` |
 | yfinance | Nothing (unofficial; swap for Alpaca/Twelve Data if it breaks). Also supplies TTF gas (`TTF=F`) | – |
 | National Gas data portal | Nothing. SAP is data item `PUBOB603` | – |
+| Open-Meteo | Nothing (free for non-commercial use, CC BY 4.0) | – |
 
 ### 2. Local development
 ```bash
@@ -414,5 +420,5 @@ shut them down.
 * **ERA5 request refused**: accept the dataset licence on the CDS website (one-off).
 
 Data: Contains BMRS data © Elexon Limited copyright and database right. ENTSO-E
-Transparency Platform. FRED®, Federal Reserve Bank of St. Louis. Gas SAP: National Gas Transmission. Copernicus Climate Change
+Transparency Platform. FRED®, Federal Reserve Bank of St. Louis. Gas SAP: National Gas Transmission. Weather forecasts: Open-Meteo.com (CC BY 4.0). Copernicus Climate Change
 Service (ERA5).

@@ -99,6 +99,12 @@ def fetch_wind_solar_forecast(session: requests.Session, publish_date: date) -> 
     return _get(session, "/datasets/DGWS", _publish_day(publish_date))
 
 
+def fetch_demand_forecast_daily(session: requests.Session, publish_date: date) -> bytes:
+    """National demand forecast 2-14 days ahead (NDFD): one publish a day (~14:45 UTC), one
+    figure per day, the forecast daily PEAK of national demand in MW."""
+    return _get(session, "/datasets/NDFD", _publish_day(publish_date))
+
+
 # Landing dataset name -> fetcher. run_elexon calls each one per day of its window.
 DATASETS: dict[str, Callable[[requests.Session, date], bytes]] = {
     "system_prices": fetch_system_prices,
@@ -108,4 +114,5 @@ DATASETS: dict[str, Callable[[requests.Session, date], bytes]] = {
     "demand_forecast": fetch_demand_forecast,
     "wind_forecast": fetch_wind_forecast,
     "wind_solar_forecast": fetch_wind_solar_forecast,
+    "demand_forecast_daily": fetch_demand_forecast_daily,
 }

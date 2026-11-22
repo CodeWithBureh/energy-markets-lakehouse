@@ -29,7 +29,8 @@ def test_forecasts_are_requested_by_publish_day():
     s = FakeSession()
     for fn, path in ((elexon.fetch_demand_forecast, "/datasets/NDF"),
                      (elexon.fetch_wind_forecast, "/datasets/WINDFOR"),
-                     (elexon.fetch_wind_solar_forecast, "/datasets/DGWS")):
+                     (elexon.fetch_wind_solar_forecast, "/datasets/DGWS"),
+                     (elexon.fetch_demand_forecast_daily, "/datasets/NDFD")):
         fn(s, date(2026, 11, 18))
         assert s.calls[-1] == (path, {"publishDateTimeFrom": "2026-11-18T00:00:00Z",
                                       "publishDateTimeTo": "2026-11-18T23:59:59Z",
@@ -83,8 +84,9 @@ def test_run_elexon_lands_every_dataset_per_day(tmp_path, monkeypatch):
     monkeypatch.setattr(elexon, "DATASETS", {n: fake(n) for n in elexon.DATASETS})
     rep = cli.run_elexon(str(tmp_path), date(2026, 11, 18), date(2026, 11, 19), "ts")
 
-    assert len(seen) == 2 * 7
-    assert len(rep.files) == 2 * 6 and rep.rows_hint == 2 * 6 * 2
+    n = len(elexon.DATASETS)
+    assert len(seen) == 2 * n
+    assert len(rep.files) == 2 * (n - 1) and rep.rows_hint == 2 * (n - 1) * 2
     # One failing dataset is reported, and the others still land.
     assert rep.errors == ["wind_forecast 2026-11-18: boom", "wind_forecast 2026-11-19: boom"]
     landed = {Path(f).relative_to(tmp_path).parts[1] for f in rep.files}

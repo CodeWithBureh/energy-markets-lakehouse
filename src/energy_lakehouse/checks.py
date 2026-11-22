@@ -39,16 +39,22 @@ SILVER_KEYS = {
                                "settlement_date", "settlement_period"],
     "gb_gas_sap_daily": ["gas_day"],
     "ttf_gas_daily": ["trade_date"],
+    "gb_demand_forecast_daily": ["publish_time_utc", "forecast_date"],
+    "weather_forecast_gb_hourly": ["issued_utc", "valid_time_utc", "latitude", "longitude"],
 }
 SILVER_TABLES = [*SILVER_KEYS, "fx_rates_daily", "gas_prices"]
 GOLD_TABLES = ["dim_date", "dim_company", "dim_fx_daily", "gb_weather_hourly",
                "fact_gb_half_hourly", "fact_eu_day_ahead_hourly", "fact_market_daily",
                "fact_stock_returns_daily", "mart_stocks_vs_market",
-               "fact_gb_day_ahead_forecasts"]
+               "fact_gb_day_ahead_forecasts", "gb_wind_power_curve",
+               "fact_gb_week_ahead_outlook"]
 # Loaded only by the weekly ERA5 job or a weather backfill, so may be empty in a fresh copy.
 OPTIONAL_TABLES = {"era5_gb_grid_hourly", "gb_weather_hourly"}
 # Added in Nov 2026: warn only until prod has been backfilled, then make them required.
-OPTIONAL_TABLES |= {"gb_gas_sap_daily", "ttf_gas_daily"}
+OPTIONAL_TABLES |= {"gb_gas_sap_daily", "ttf_gas_daily", "gb_demand_forecast_daily",
+                    "weather_forecast_gb_hourly", "fact_gb_week_ahead_outlook"}
+# Built from ERA5, so empty whenever ERA5 is.
+OPTIONAL_TABLES |= {"gb_wind_power_curve"}
 
 # Wide enough for any real GB imbalance price; anything outside is a parsing bug.
 PRICE_BOUNDS = (-1000.0, 10000.0)
