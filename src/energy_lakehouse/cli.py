@@ -9,6 +9,10 @@ Examples
 
 With no --start/--end, each source uses a sensible rolling window that overlaps earlier
 runs, so revisions and late data get picked up. Bronze is append-only and silver dedupes.
+
+Work already done is skipped: a partition landed after its source stopped revising it is not
+downloaded again, and a download identical to the last landed file is not written. Use
+--refetch to download and land everything regardless.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from pathlib import Path
 from energy_lakehouse import config
 from energy_lakehouse.credentials import get_secret
 from energy_lakehouse.http_client import make_session
-from energy_lakehouse.landing import land_bytes, run_timestamp
+from energy_lakehouse.landing import is_settled, land_bytes, land_if_changed, run_timestamp
 from energy_lakehouse.parsers import entsoe_xml
 from energy_lakehouse.timeutils import BRUSSELS, daterange, parse_iso_utc, today_london
 
@@ -43,14 +47,21 @@ class RunReport:
     files: list[str] = field(default_factory=list)
     rows_hint: int = 0
     errors: list[str] = field(default_factory=list)
+    skipped_settled: int = 0      # not downloaded: already landed after the source settled
+    unchanged: int = 0            # downloaded, identical to what was landed, not written
 
     def summary(self) -> dict:
         return {
             "source": self.source,
             "files_written": len(self.files),
+            "skipped_settled": self.skipped_settled,
+            "unchanged": self.unchanged,
             "rows_hint": self.rows_hint,
             "errors": self.errors,
         }
+
+    def did_something(self) -> bool:
+        return bool(self.files or self.skipped_settled or self.unchanged)
 
 
 def default_window(source: str, today: date) -> tuple[date, date]:
@@ -73,9 +84,39 @@ def default_window(source: str, today: date) -> tuple[date, date]:
     raise ValueError(source)
 
 
+@dataclass
+class Lander:
+    """Writes into the landing zone for one run, skipping work already done unless
+    ``refetch`` is set (see landing.is_settled and landing.land_if_changed)."""
+    root: str
+    ts: str
+    refetch: bool = False
+
+    def settled(self, rep: RunReport, source: str, dataset: str, d: date, tag: str = "") -> bool:
+        if self.refetch or not is_settled(self.root, source, dataset, d, tag):
+            return False
+        rep.skipped_settled += 1
+        return True
+
+    def land(self, rep: RunReport, source: str, dataset: str, d: date, body: bytes, ext: str,
+             tag: str = "", fingerprint=None) -> None:
+        if self.refetch:
+            path = land_bytes(self.root, source, dataset, d, body, ext,
+                              f"{self.ts}_{tag}" if tag else self.ts)
+        else:
+            path = land_if_changed(self.root, source, dataset, d, body, ext, self.ts, tag,
+                                   fingerprint)
+        if path is None:
+            rep.unchanged += 1
+            log.info("%s %s %s: unchanged since the last landing; not written",
+                     source, dataset, d)
+        else:
+            rep.files.append(str(path))
+
+
 # --- per-source runners ----------------------------------------------------------------
 
-def run_elexon(root: str, start: date, end: date, ts: str) -> RunReport:
+def run_elexon(lander: Lander, start: date, end: date) -> RunReport:
     from energy_lakehouse.sources import elexon
 
     rep = RunReport("elexon")
@@ -83,12 +124,14 @@ def run_elexon(root: str, start: date, end: date, ts: str) -> RunReport:
     for d in daterange(start, end):
         # Outturn and prices are dated by settlement day, forecasts by publish day.
         for dataset, fn in elexon.DATASETS.items():
+            if lander.settled(rep, "elexon", dataset, d):
+                continue
             t0 = time.monotonic()
             try:
                 body = fn(s, d)
                 n = len(json.loads(body)["data"])
                 rep.rows_hint += n
-                rep.files.append(str(land_bytes(root, "elexon", dataset, d, body, "json", ts)))
+                lander.land(rep, "elexon", dataset, d, body, "json")
                 log.info("Elexon %s %s: %d rows in %.1fs", dataset, d, n, time.monotonic() - t0)
                 if n == 0:
                     log.warning("Elexon %s %s returned no rows", dataset, d)
@@ -99,19 +142,22 @@ def run_elexon(root: str, start: date, end: date, ts: str) -> RunReport:
     return rep
 
 
-def run_entsoe(root: str, start: date, end: date, ts: str, scope: str | None) -> RunReport:
+def run_entsoe(lander: Lander, start: date, end: date, scope: str | None) -> RunReport:
     from energy_lakehouse.sources import entsoe
 
     rep = RunReport("entsoe")
     token = get_secret("entsoe", scope)
     s = make_session()
+    days = list(daterange(start, end))
     for zone, eic in config.ENTSOE_ZONES.items():
+        if not lander.refetch and all(
+                is_settled(lander.root, "entsoe", "day_ahead", d, zone) for d in days):
+            rep.skipped_settled += 1
+            continue
         t0 = time.monotonic()
         try:
             # One request per zone for the whole window (see fetch_day_ahead_prices).
             xml = entsoe.fetch_day_ahead_prices(s, token, eic, start, end)
-            # Keep the untouched XML as the immutable archive...
-            land_bytes(root, "entsoe", "day_ahead_xml", start, xml, "xml", f"{ts}_{zone}")
             rows = entsoe_xml.parse_day_ahead(xml, zone)
             log.info("ENTSO-E %s %s..%s: %d rows in %.1fs (%d KB)", zone, start, end,
                      len(rows), time.monotonic() - t0, len(xml) // 1024)
@@ -119,21 +165,25 @@ def run_entsoe(root: str, start: date, end: date, ts: str, scope: str | None) ->
                 log.warning("ENTSO-E %s %s..%s: no data (%s)", zone, start, end,
                             entsoe_xml.acknowledgement_reason(xml))
                 continue
-            # ...and land the parsed rows as JSON lines, one file per CET/CEST delivery day,
-            # so Auto Loader and silver see the same layout as before.
+            # Land the parsed rows as JSON lines, one file per CET/CEST delivery day, so Auto
+            # Loader and silver see the same layout as before...
             by_day: dict[date, list[dict]] = defaultdict(list)
             for r in rows:
                 day = parse_iso_utc(r["delivery_start_utc"]).astimezone(BRUSSELS).date()
                 by_day[day].append(r)
-            for day in daterange(start, end):
+            before = len(rep.files)
+            for day in days:
                 if day not in by_day:
                     log.warning("ENTSO-E %s %s: missing from the response", zone, day)
                     continue
                 payload = ("\n".join(json.dumps(r) for r in by_day[day]) + "\n").encode()
-                path = land_bytes(root, "entsoe", "day_ahead", day, payload, "jsonl",
-                                  f"{ts}_{zone}")
-                rep.files.append(str(path))
+                lander.land(rep, "entsoe", "day_ahead", day, payload, "jsonl", zone)
                 rep.rows_hint += len(by_day[day])
+            # ...and archive the untouched XML only when some day changed. (The XML carries
+            # its creation time, so it never compares equal by itself.)
+            if len(rep.files) > before:
+                land_bytes(lander.root, "entsoe", "day_ahead_xml", start, xml, "xml",
+                           f"{lander.ts}_{zone}")
         except Exception as exc:  # noqa: BLE001
             log.warning("ENTSO-E %s %s..%s failed after %.1fs: %s", zone, start, end,
                         time.monotonic() - t0, exc)
@@ -141,13 +191,23 @@ def run_entsoe(root: str, start: date, end: date, ts: str, scope: str | None) ->
     return rep
 
 
-def run_fred(root: str, start: date, end: date, ts: str, scope: str | None) -> RunReport:
+def _fred_observations(body: bytes):
+    # FRED stamps every response with today's realtime_start/end; compare the data only.
+    return json.loads(body).get("observations")
+
+
+def run_fred(lander: Lander, start: date, end: date, scope: str | None) -> RunReport:
     from energy_lakehouse.sources import fred
 
     rep = RunReport("fred")
     key = get_secret("fred", scope)
     s = make_session()
     for series_id in config.FRED_SERIES:
+        # Range sources land one file per window, keyed by its end date; the tag records the
+        # start, so only a file for exactly this window counts as already done.
+        tag = f"{series_id}_from{start.isoformat()}"
+        if lander.settled(rep, "fred", "observations", end, tag):
+            continue
         t0 = time.monotonic()
         try:
             body = fred.fetch_observations(s, key, series_id, start, end)
@@ -155,21 +215,21 @@ def run_fred(root: str, start: date, end: date, ts: str, scope: str | None) -> R
             rep.rows_hint += n
             log.info("FRED %s %s..%s: %d observations in %.1fs", series_id, start, end, n,
                      time.monotonic() - t0)
-            rep.files.append(
-                str(land_bytes(root, "fred", "observations", end, body, "json",
-                               f"{ts}_{series_id}"))
-            )
+            lander.land(rep, "fred", "observations", end, body, "json", tag, _fred_observations)
         except Exception as exc:  # noqa: BLE001
             log.warning("FRED %s failed after %.1fs: %s", series_id, time.monotonic() - t0, exc)
             rep.errors.append(f"{series_id}: {exc}")
     return rep
 
 
-def run_stocks(root: str, start: date, end: date, ts: str) -> RunReport:
+def run_stocks(lander: Lander, start: date, end: date) -> RunReport:
     from energy_lakehouse.sources import stocks
 
     rep = RunReport("stocks")
     for ticker in config.STOCKS:
+        tag = f"{ticker.replace('.', '_')}_from{start.isoformat()}"
+        if lander.settled(rep, "stocks", "daily_prices", end, tag):
+            continue
         t0 = time.monotonic()
         try:
             body = stocks.fetch_daily_prices(ticker, start, end)
@@ -181,25 +241,24 @@ def run_stocks(root: str, start: date, end: date, ts: str) -> RunReport:
                 log.warning("Stocks %s %s..%s: no rows", ticker, start, end)
                 continue
             rep.rows_hint += n
-            safe = ticker.replace(".", "_")
-            rep.files.append(
-                str(land_bytes(root, "stocks", "daily_prices", end, body, "jsonl",
-                               f"{ts}_{safe}"))
-            )
+            lander.land(rep, "stocks", "daily_prices", end, body, "jsonl", tag)
         except Exception as exc:  # noqa: BLE001
             log.warning("Stocks %s failed after %.1fs: %s", ticker, time.monotonic() - t0, exc)
             rep.errors.append(f"{ticker}: {exc}")
     return rep
 
 
-def run_gas(root: str, start: date, end: date, ts: str) -> RunReport:
+def run_gas(lander: Lander, start: date, end: date) -> RunReport:
     from energy_lakehouse.sources import gas
 
     rep = RunReport("gas")
     s = make_session()
     fetchers = {"sap": lambda: gas.fetch_sap(s, start, end),
                 "ttf": lambda: gas.fetch_ttf(start, end)}
+    tag = f"from{start.isoformat()}"
     for dataset, fetch in fetchers.items():
+        if lander.settled(rep, "gas", dataset, end, tag):
+            continue
         t0 = time.monotonic()
         try:
             body = fetch()
@@ -210,24 +269,25 @@ def run_gas(root: str, start: date, end: date, ts: str) -> RunReport:
                 log.warning("Gas %s %s..%s: no rows", dataset, start, end)
                 continue
             rep.rows_hint += n
-            rep.files.append(str(land_bytes(root, "gas", dataset, end, body, "jsonl", ts)))
+            lander.land(rep, "gas", dataset, end, body, "jsonl", tag)
         except Exception as exc:  # noqa: BLE001
             log.warning("Gas %s failed after %.1fs: %s", dataset, time.monotonic() - t0, exc)
             rep.errors.append(f"{dataset}: {exc}")
     return rep
 
 
-def run_weather_forecast(root: str, ts: str, today: date) -> RunReport:
+def run_weather_forecast(lander: Lander, today: date) -> RunReport:
     from energy_lakehouse.sources import weather_forecast
 
+    # Every fetch is a new forecast, so there is nothing to skip.
     rep = RunReport("weather_forecast")
     t0 = time.monotonic()
     try:
         body = weather_forecast.fetch(make_session())
         n = body.count(b"\n")
         rep.rows_hint = n
-        rep.files.append(str(land_bytes(root, "weather_forecast", "gb_hourly", today, body,
-                                        "jsonl", ts)))
+        rep.files.append(str(land_bytes(lander.root, "weather_forecast", "gb_hourly", today,
+                                        body, "jsonl", lander.ts)))
         log.info("Weather forecast: %d point-hours in %.1fs", n, time.monotonic() - t0)
     except Exception as exc:  # noqa: BLE001
         log.warning("Weather forecast failed after %.1fs: %s", time.monotonic() - t0, exc)
@@ -235,33 +295,39 @@ def run_weather_forecast(root: str, ts: str, today: date) -> RunReport:
     return rep
 
 
-def run_era5(root: str, start: date, end: date, ts: str, scope: str | None) -> RunReport:
+def run_era5(lander: Lander, start: date, end: date, scope: str | None) -> RunReport:
     from energy_lakehouse.parsers.era5_netcdf import flatten_era5, to_parquet_bytes
     from energy_lakehouse.sources import era5
 
     rep = RunReport("era5")
-    key = get_secret("cds", scope)
+    key = None
     days = list(daterange(start, end))
     with tempfile.TemporaryDirectory() as tmp:
         for (year, month), group in era5.group_by_month(days).items():
             label = f"{year:04d}-{month:02d}"
+            anchor, tag = group[0], f"to{group[-1].isoformat()}"
+            # The CDS queue is the slow part, so this is where skipping pays most.
+            if lander.settled(rep, "era5", "gb_hourly", anchor, tag):
+                log.info("ERA5 %s: final data already landed; skipping the CDS request", label)
+                continue
+            key = key or get_secret("cds", scope)
             t0 = time.monotonic()
             log.info("ERA5 %s: requesting %d day(s); the CDS queue can take a while",
                      label, len(group))
             try:
                 nc = Path(tmp) / f"era5_gb_{label}.nc"
                 era5.fetch_month(key, year, month, [d.day for d in group], nc)
-                anchor = group[0]
-                # Mixed instant/accumulated variables come back zipped (see era5_netcdf).
-                ext = "zip" if zipfile.is_zipfile(nc) else "nc"
-                land_bytes(root, "era5", "gb_hourly_netcdf", anchor, nc.read_bytes(), ext, ts)
                 df = flatten_era5(nc)
                 rep.rows_hint += len(df)
                 log.info("ERA5 %s: %d grid rows in %.1fs", label, len(df), time.monotonic() - t0)
-                rep.files.append(
-                    str(land_bytes(root, "era5", "gb_hourly", anchor,
-                                   to_parquet_bytes(df), "parquet", ts))
-                )
+                before = len(rep.files)
+                lander.land(rep, "era5", "gb_hourly", anchor, to_parquet_bytes(df), "parquet",
+                            tag)
+                if len(rep.files) > before:
+                    # Mixed instant/accumulated variables come back zipped (see era5_netcdf).
+                    ext = "zip" if zipfile.is_zipfile(nc) else "nc"
+                    land_bytes(lander.root, "era5", "gb_hourly_netcdf", anchor, nc.read_bytes(),
+                               ext, f"{lander.ts}_{tag}")
             except Exception as exc:  # noqa: BLE001
                 log.warning("ERA5 %s failed after %.1fs: %s", label, time.monotonic() - t0, exc)
                 rep.errors.append(f"{label}: {exc}")
@@ -273,6 +339,11 @@ def run_era5(root: str, start: date, end: date, ts: str, scope: str | None) -> R
 def _parse_date(v: str) -> date | None:
     # Jobs always pass --start={{job.parameters.start}}; blank means "use the default window".
     return date.fromisoformat(v) if v.strip() else None
+
+
+def _parse_bool(v: str) -> bool:
+    # Jobs pass --refetch={{job.parameters.refetch}}, which may be blank.
+    return v.strip().lower() in ("true", "1", "yes")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -289,6 +360,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Cost guard: refuse bigger windows unless raised explicitly")
     p.add_argument("--allow-partial", action="store_true",
                    help="Exit 0 even if some requests failed")
+    p.add_argument("--refetch", type=_parse_bool, nargs="?", const=True, default=False,
+                   help="Download and land everything, even data already landed and unchanged")
     return p
 
 
@@ -319,37 +392,40 @@ def main(argv: list[str] | None = None) -> int:
 
     ts = run_timestamp()
     root = args.landing_root
+    lander = Lander(root, ts, refetch=args.refetch)
     log.info("Ingesting %s for %s..%s (%d days) into %s", args.source, start, end, span, root)
     t0 = time.monotonic()
 
     if args.source == "elexon":
-        rep = run_elexon(root, start, end, ts)
+        rep = run_elexon(lander, start, end)
     elif args.source == "entsoe":
-        rep = run_entsoe(root, start, end, ts, args.secret_scope)
+        rep = run_entsoe(lander, start, end, args.secret_scope)
     elif args.source == "fred":
-        rep = run_fred(root, start, end, ts, args.secret_scope)
+        rep = run_fred(lander, start, end, args.secret_scope)
     elif args.source == "stocks":
-        rep = run_stocks(root, start, end, ts)
+        rep = run_stocks(lander, start, end)
     elif args.source == "gas":
-        rep = run_gas(root, start, end, ts)
+        rep = run_gas(lander, start, end)
     elif args.source == "weather_forecast":
         # A forecast is only ever "as of now": there is no history to backfill.
         if args.start or args.end:
             log.warning("weather_forecast ignores --start/--end; fetching the latest forecast")
-        rep = run_weather_forecast(root, ts, today_london())
+        rep = run_weather_forecast(lander, today_london())
     else:
-        rep = run_era5(root, start, end, ts, args.secret_scope)
+        rep = run_era5(lander, start, end, args.secret_scope)
 
     elapsed = time.monotonic() - t0
-    log.info("Finished %s in %.1fs: %d files, ~%d rows, %d errors", args.source, elapsed,
-             len(rep.files), rep.rows_hint, len(rep.errors))
+    log.info("Finished %s in %.1fs: %d files written, %d skipped (settled), %d unchanged, "
+             "~%d rows, %d errors", args.source, elapsed, len(rep.files), rep.skipped_settled,
+             rep.unchanged, rep.rows_hint, len(rep.errors))
     for err in rep.errors:
         log.error("%s: %s", args.source, err)
     print(json.dumps({**rep.summary(), "elapsed_seconds": round(elapsed, 1)}, indent=2))
     if rep.errors and not args.allow_partial:
         # Fail the task (so retries/alerts fire) only if *nothing* landed. A single
         # missing zone or ticker shouldn't block the whole pipeline.
-        return 1 if not rep.files else 0
+        # Skipped or unchanged partitions count as done.
+        return 1 if not rep.did_something() else 0
     return 0
 
 
