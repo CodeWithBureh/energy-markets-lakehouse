@@ -38,7 +38,8 @@ from energy_lakehouse.timeutils import BRUSSELS, daterange, parse_iso_utc, today
 
 log = logging.getLogger("energy_lakehouse")
 
-SOURCES = ("elexon", "entsoe", "fred", "stocks", "era5", "gas", "weather_forecast")
+SOURCES = ("elexon", "entsoe", "fred", "stocks", "era5", "gas", "weather_forecast",
+           "weather_forecast_archive")
 
 
 @dataclass
@@ -66,7 +67,9 @@ class RunReport:
 
 def default_window(source: str, today: date) -> tuple[date, date]:
     if source == "elexon":
-        return today - timedelta(days=3), today - timedelta(days=1)
+        # Up to today: forecasts published overnight (WINDFOR for tomorrow) are needed by
+        # this morning's outlook. Today's partial partitions are fetched again tomorrow.
+        return today - timedelta(days=3), today
     if source == "entsoe":
         return today - timedelta(days=1), today + timedelta(days=1)  # tomorrow may be absent
     if source == "fred":
@@ -75,6 +78,8 @@ def default_window(source: str, today: date) -> tuple[date, date]:
         return today - timedelta(days=7), today
     if source == "weather_forecast":
         return today, today                         # always "now"; dates are ignored
+    if source == "weather_forecast_archive":
+        return today - timedelta(days=14), today - timedelta(days=1)
     if source == "gas":
         # SAP for gas day D is final around 11:40 on D+1, and TTF settles after the close.
         return today - timedelta(days=7), today
@@ -295,6 +300,43 @@ def run_weather_forecast(lander: Lander, today: date) -> RunReport:
     return rep
 
 
+def run_weather_forecast_archive(lander: Lander, start: date, end: date,
+                                 today: date) -> RunReport:
+    """Past forecast issues rebuilt from Open-Meteo's Previous Runs API, one file per month
+    of issue days. Only issues whose whole week is past, so every value is final."""
+    import pandas as pd
+
+    from energy_lakehouse.parsers.era5_netcdf import to_parquet_bytes
+    from energy_lakehouse.sources import weather_forecast as wf
+    from energy_lakehouse.sources.era5 import group_by_month
+
+    rep = RunReport("weather_forecast_archive")
+    first = max(start, wf.ARCHIVE_SINCE)
+    last = min(end, today - timedelta(days=wf.OUTLOOK_DAYS + 1))
+    if first > last:
+        log.info("Forecast archive: no complete issues in %s..%s", start, end)
+        return rep
+    s = make_session()
+    for (year, month), group in group_by_month(list(daterange(first, last))).items():
+        label = f"{year:04d}-{month:02d}"
+        anchor, tag = group[0], f"to{group[-1].isoformat()}"
+        if lander.settled(rep, "weather_forecast", "gb_hourly_archive", anchor, tag):
+            continue
+        t0 = time.monotonic()
+        try:
+            rows = wf.fetch_archive(s, group[0], group[-1])
+            rep.rows_hint += len(rows)
+            log.info("Forecast archive %s: %d issues, %d point-hours in %.1fs", label,
+                     len(group), len(rows), time.monotonic() - t0)
+            lander.land(rep, "weather_forecast", "gb_hourly_archive", anchor,
+                        to_parquet_bytes(pd.DataFrame(rows)), "parquet", tag)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Forecast archive %s failed after %.1fs: %s", label,
+                        time.monotonic() - t0, exc)
+            rep.errors.append(f"{label}: {exc}")
+    return rep
+
+
 def run_era5(lander: Lander, start: date, end: date, scope: str | None) -> RunReport:
     from energy_lakehouse.parsers.era5_netcdf import flatten_era5, to_parquet_bytes
     from energy_lakehouse.sources import era5
@@ -411,6 +453,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.start or args.end:
             log.warning("weather_forecast ignores --start/--end; fetching the latest forecast")
         rep = run_weather_forecast(lander, today_london())
+    elif args.source == "weather_forecast_archive":
+        rep = run_weather_forecast_archive(lander, start, end, today_london())
     else:
         rep = run_era5(lander, start, end, args.secret_scope)
 

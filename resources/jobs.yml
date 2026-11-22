@@ -201,7 +201,8 @@ resources:
     #   databricks bundle run -t prod energy_backfill --params start_month=2024-01,end_month=current
     #   databricks bundle run -t prod energy_backfill --params "months=2024-03 2024-10"
     #   ...add include_weather=true for ERA5 (slow: the CDS queue can take an hour a month)
-    #   ...or weather_only=true for ERA5 alone (skips Elexon, ENTSO-E, FRED, stocks and gas)
+    #   ...or weather_only=true for ERA5 alone (skips Elexon, ENTSO-E, FRED, stocks, gas and
+    #   the forecast archive)
     #   Months already landed and settled are skipped (rerunning only fills gaps); add
     #   refetch=true to download everything again.
     #
@@ -393,6 +394,36 @@ resources:
                   - --refetch={{job.parameters.refetch}}
                   - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
+        # Past week-ahead weather forecasts (Open-Meteo Previous Runs API, no key), for
+        # backtesting the outlook. Free tier: 10,000 calls a day, and the full history from
+        # Mar 2024 is about 11,000, so a first full backfill may stop partway with HTTP 429.
+        # Rerun it the next day: months already landed are skipped.
+        - task_key: backfill_weather_forecast_archive
+          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
+            on_failure: [ "${var.alert_email}" ]
+          depends_on:
+            - task_key: plan_months
+            - task_key: markets_requested
+              outcome: "true"
+          for_each_task:
+            inputs: "{{tasks.plan_months.values.months}}"
+            concurrency: 1
+            task:
+              task_key: backfill_weather_forecast_archive_month
+              environment_key: ingest
+              timeout_seconds: 900
+              max_retries: 1
+              min_retry_interval_millis: 300000
+              python_wheel_task:
+                package_name: energy_lakehouse
+                entry_point: ingest
+                parameters:
+                  - --source=weather_forecast_archive
+                  - --start={{input.start}}
+                  - --end={{input.end}}
+                  - --refetch={{job.parameters.refetch}}
+                  - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
+
         - task_key: weather_requested
           depends_on:
             - task_key: plan_months
@@ -438,6 +469,7 @@ resources:
             - task_key: backfill_fred
             - task_key: backfill_stocks
             - task_key: backfill_gas
+            - task_key: backfill_weather_forecast_archive
             - task_key: backfill_era5
           pipeline_task:
             pipeline_id: ${resources.pipelines.energy_pipeline.id}

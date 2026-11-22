@@ -5,7 +5,7 @@ from energy_lakehouse.cli import build_parser, default_window, main
 
 def test_default_windows_overlap_for_revisions():
     today = date(2026, 11, 12)
-    assert default_window("elexon", today) == (date(2026, 11, 9), date(2026, 11, 11))
+    assert default_window("elexon", today) == (date(2026, 11, 9), date(2026, 11, 12))
     assert default_window("entsoe", today) == (date(2026, 11, 11), date(2026, 11, 13))
     start, end = default_window("era5", today)
     assert end == date(2026, 11, 6) and (end - start).days == 6
