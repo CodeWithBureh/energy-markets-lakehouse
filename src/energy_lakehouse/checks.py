@@ -41,6 +41,8 @@ SILVER_KEYS = {
     "ttf_gas_daily": ["trade_date"],
     "gb_demand_forecast_daily": ["publish_time_utc", "forecast_date"],
     "weather_forecast_gb_hourly": ["issued_utc", "valid_time_utc", "latitude", "longitude"],
+    "weather_forecast_gb_hourly_archive": ["issued_utc", "valid_time_utc", "latitude",
+                                           "longitude"],
 }
 SILVER_TABLES = [*SILVER_KEYS, "fx_rates_daily", "gas_prices"]
 GOLD_TABLES = ["dim_date", "dim_company", "dim_fx_daily", "gb_weather_hourly",
@@ -52,6 +54,8 @@ GOLD_TABLES = ["dim_date", "dim_company", "dim_fx_daily", "gb_weather_hourly",
 OPTIONAL_TABLES = {"era5_gb_grid_hourly", "gb_weather_hourly"}
 # Open-Meteo has no history: these fill from daily runs only, so warn until prod has some.
 OPTIONAL_TABLES |= {"weather_forecast_gb_hourly", "fact_gb_week_ahead_outlook"}
+# Past issues, loaded only by a backfill.
+OPTIONAL_TABLES |= {"weather_forecast_gb_hourly_archive"}
 # Built from ERA5, so empty whenever ERA5 is.
 OPTIONAL_TABLES |= {"gb_wind_power_curve"}
 

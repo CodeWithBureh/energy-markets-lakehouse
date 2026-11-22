@@ -302,18 +302,52 @@ def gb_wind_power_curve():
 @dlt.table(name=f"{GOLD}.fact_gb_week_ahead_outlook",
            comment="Per forecast issue (one a day) and each of the next 7 days: forecast "
                    "demand, wind, residual demand, weather and the latest gas prices. "
-                   "Inputs for the week-ahead price report (sql/week_ahead_report.sql).")
+                   "Inputs for the week-ahead price report (sql/week_ahead_report.sql) and "
+                   "its backtest (sql/week_ahead_backtest.sql). Issues before the live "
+                   "forecast started are rebuilt from Open-Meteo's archive "
+                   "(is_archived_forecast).")
 def fact_gb_week_ahead_outlook():
-    # 1. Weather forecast -> GB-average hourly wind speed -> MW through the power curve.
-    wx = s("weather_forecast_gb_hourly").withColumn(
+    # 1. Weather forecast, GB-average per hour. Live fetches, plus past issues rebuilt from
+    #    the archive; on a day with both, the live one.
+    live = s("weather_forecast_gb_hourly").select(
+        "issued_utc", "valid_time_utc", "latitude", "longitude", "wind_speed_100m_ms",
+        "temp_c", "solar_irradiance_wm2", F.lit(0).alias("lead_shortfall_hours"),
+        F.lit(False).alias("is_archived_forecast"))
+    archive = s("weather_forecast_gb_hourly_archive").select(
+        "issued_utc", "valid_time_utc", "latitude", "longitude", "wind_speed_100m_ms",
+        "temp_c", F.lit(None).cast("double").alias("solar_irradiance_wm2"),
+        "lead_shortfall_hours", F.lit(True).alias("is_archived_forecast"))
+    wx = live.unionByName(archive).withColumn(
         "issue_date", F.to_date(F.from_utc_timestamp("issued_utc", "Europe/London")))
-    # Keep the last fetch of each day.
-    last_issue = wx.groupBy("issue_date").agg(F.max("issued_utc").alias("issued_utc"))
-    wx = wx.join(last_issue, ["issue_date", "issued_utc"])
-    hourly = wx.groupBy("issue_date", "issued_utc", "valid_time_utc").agg(
+    # One issue a day: the last live fetch, else the archived one.
+    wi = Window.partitionBy("issue_date").orderBy("is_archived_forecast",
+                                                  F.col("issued_utc").desc())
+    chosen = (wx.select("issue_date", "issued_utc", "is_archived_forecast").distinct()
+              .withColumn("_rn", F.row_number().over(wi)).filter("_rn = 1").drop("_rn"))
+    wx = wx.join(chosen, ["issue_date", "issued_utc", "is_archived_forecast"])
+    hourly = wx.groupBy("issue_date", "issued_utc", "is_archived_forecast", "valid_time_utc").agg(
         F.avg("wind_speed_100m_ms").alias("wind_speed_100m_ms"),
         F.avg("temp_c").alias("temp_c"),
         F.avg("solar_irradiance_wm2").alias("solar_irradiance_wm2"),
+        F.max("lead_shortfall_hours").alias("lead_shortfall_hours"),
+    )
+    issues = hourly.select("issue_date", "issued_utc").distinct()
+
+    # 2. Wind in MW per hour: Elexon's own forecast (WINDFOR x correction, latest publish
+    #    before the issue) for every hour it covers, the weather forecast through the power
+    #    curve for the rest.
+    wf = s("gb_wind_forecast")
+    ww = Window.partitionBy("issue_date", "start_time_utc").orderBy(F.col("publish_time_utc").desc())
+    scale = g("fact_gb_day_ahead_forecasts").groupBy(F.col("settlement_date").alias("issue_date")) \
+        .agg(F.first("wind_forecast_scale", ignorenulls=True).alias("_scale"))
+    windfor = (
+        issues.join(wf, (wf.publish_time_utc <= issues.issued_utc)
+                    & (wf.publish_time_utc > issues.issued_utc - F.expr("INTERVAL 3 DAYS"))
+                    & (wf.start_time_utc > issues.issued_utc))
+        .withColumn("_rn", F.row_number().over(ww)).filter("_rn = 1")
+        .join(scale, "issue_date", "left")
+        .select("issue_date", F.col("start_time_utc").alias("valid_time_utc"),
+                (F.col("wind_mw") * F.col("_scale")).alias("windfor_adjusted_mw"))
     )
     curve = g("gb_wind_power_curve")
     top_bin = curve.agg(F.max("wind_speed_bin_ms").alias("_top"))
@@ -321,33 +355,38 @@ def fact_gb_week_ahead_outlook():
         hourly.crossJoin(top_bin)
         .withColumn("wind_speed_bin_ms", F.least(_speed_bin("wind_speed_100m_ms"), F.col("_top")))
         .join(curve.select("wind_speed_bin_ms", "median_wind_mw"), "wind_speed_bin_ms", "left")
+        .join(windfor, ["issue_date", "valid_time_utc"], "left")
+        .withColumn("_wind_mw", F.coalesce("windfor_adjusted_mw", "median_wind_mw"))
     )
     days = (
         hourly.withColumn("target_date",
                           F.to_date(F.from_utc_timestamp("valid_time_utc", "Europe/London")))
         .filter((F.col("target_date") > F.col("issue_date"))
                 & (F.col("target_date") <= F.date_add("issue_date", OUTLOOK_DAYS)))
-        .groupBy("issue_date", "issued_utc", "target_date")
-        .agg(F.avg("median_wind_mw").alias("wind_weather_mw"),
+        .groupBy("issue_date", "issued_utc", "is_archived_forecast", "target_date")
+        .agg(F.avg("_wind_mw").alias("wind_forecast_mw"),
+             F.avg("median_wind_mw").alias("wind_weather_mw"),
+             F.count("windfor_adjusted_mw").alias("windfor_hours"),
              F.avg("wind_speed_100m_ms").alias("avg_wind_speed_100m_ms"),
              F.avg("temp_c").alias("avg_temp_c"),
              F.avg("solar_irradiance_wm2").alias("avg_solar_irradiance_wm2"),
+             F.max("lead_shortfall_hours").alias("forecast_lead_shortfall_hours"),
              F.count("*").alias("forecast_hours"))
     )
-    issues = days.select("issue_date", "issued_utc").distinct()
 
-    # 2. NDFD peak demand: latest vintage published before the weather fetch.
+    # 3. NDFD peak demand: latest vintage published before the weather fetch.
     ndfd = s("gb_demand_forecast_daily")
     w = Window.partitionBy("issue_date", "forecast_date").orderBy(F.col("publish_time_utc").desc())
     ndfd = (
-        issues.join(ndfd, ndfd.publish_time_utc <= issues.issued_utc)
+        issues.join(ndfd, (ndfd.publish_time_utc <= issues.issued_utc)
+                    & (ndfd.publish_time_utc > issues.issued_utc - F.expr("INTERVAL 7 DAYS")))
         .withColumn("_rn", F.row_number().over(w)).filter("_rn = 1")
         .select("issue_date", F.col("forecast_date").alias("target_date"),
                 F.col("demand_peak_mw").alias("demand_peak_forecast_mw"),
                 F.col("publish_time_utc").alias("demand_forecast_published_utc"))
     )
 
-    # 3. Daily average demand ~ ratio x peak, the ratio averaged over the 60 days before issue.
+    # 4. Daily average demand ~ ratio x peak, the ratio averaged over the 60 days before issue.
     mkt = g("fact_market_daily").filter("is_complete_day").select(
         F.col("date").alias("_d"),
         (F.col("gb_avg_demand_mw") / F.col("gb_peak_demand_mw")).alias("_ratio"))
@@ -355,24 +394,6 @@ def fact_gb_week_ahead_outlook():
         issues.join(mkt, (mkt._d < issues.issue_date)
                     & (mkt._d >= F.date_sub(issues.issue_date, DEMAND_RATIO_DAYS)))
         .groupBy("issue_date").agg(F.avg("_ratio").alias("demand_avg_to_peak_ratio"))
-    )
-
-    # 4. Elexon's own wind forecast (WINDFOR x correction) where it covers the whole day.
-    wf = s("gb_wind_forecast")
-    ww = Window.partitionBy("issue_date", "start_time_utc").orderBy(F.col("publish_time_utc").desc())
-    scale = g("fact_gb_day_ahead_forecasts").groupBy(F.col("settlement_date").alias("issue_date")) \
-        .agg(F.first("wind_forecast_scale", ignorenulls=True).alias("_scale"))
-    windfor = (
-        issues.join(wf, wf.publish_time_utc <= issues.issued_utc)
-        .withColumn("_rn", F.row_number().over(ww)).filter("_rn = 1")
-        .withColumn("target_date",
-                    F.to_date(F.from_utc_timestamp("start_time_utc", "Europe/London")))
-        .groupBy("issue_date", "target_date")
-        .agg(F.avg("wind_mw").alias("_windfor"), F.count("*").alias("_hours"))
-        .filter("_hours >= 23")                                  # 23 on the spring clock change
-        .join(scale, "issue_date", "left")
-        .select("issue_date", "target_date",
-                (F.col("_windfor") * F.col("_scale")).alias("windfor_adjusted_mw"))
     )
 
     # 5. Latest gas prices known at issue: SAP for gas day D is published on D+1.
@@ -392,20 +413,21 @@ def fact_gb_week_ahead_outlook():
         .select("issue_date", F.col("close_eur_mwh").alias("latest_ttf_eur_mwh"))
     )
 
-    wind = F.coalesce("windfor_adjusted_mw", "wind_weather_mw")
     return (
         days.join(ndfd, ["issue_date", "target_date"], "left")
         .join(ratio, "issue_date", "left")
-        .join(windfor, ["issue_date", "target_date"], "left")
         .join(sap, "issue_date", "left")
         .join(ttf, "issue_date", "left")
         .withColumn("days_ahead", F.datediff("target_date", "issue_date"))
         .withColumn("is_weekend", F.dayofweek("target_date").isin(1, 7))
         .withColumn("demand_avg_forecast_mw",
                     F.col("demand_peak_forecast_mw") * F.col("demand_avg_to_peak_ratio"))
-        .withColumn("wind_forecast_mw", wind)
-        .withColumn("wind_source", F.when(F.col("windfor_adjusted_mw").isNotNull(), "WINDFOR x scale")
-                    .otherwise("weather forecast x power curve"))
+        .withColumn("wind_source",
+                    F.when(F.col("windfor_hours") == F.col("forecast_hours"), "WINDFOR x scale")
+                    .when(F.col("windfor_hours") == 0, "weather forecast x power curve")
+                    .otherwise(F.format_string("WINDFOR x scale for %d of %d hours, power "
+                                               "curve for the rest", "windfor_hours",
+                                               "forecast_hours")))
         .withColumn("residual_demand_forecast_mw",
                     F.col("demand_avg_forecast_mw") - F.col("wind_forecast_mw"))
     )

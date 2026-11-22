@@ -72,6 +72,10 @@ WEATHER_FORECAST_SCHEMA = """
     issued_utc STRING, latitude DOUBLE, longitude DOUBLE, valid_time_utc STRING,
     wind_speed_100m_ms DOUBLE, temp_c DOUBLE, solar_irradiance_wm2 DOUBLE
 """
+WEATHER_FORECAST_ARCHIVE_SCHEMA = """
+    issued_utc STRING, latitude DOUBLE, longitude DOUBLE, valid_time_utc STRING,
+    wind_speed_100m_ms DOUBLE, temp_c DOUBLE, lead_days BIGINT, lead_shortfall_hours BIGINT
+"""
 GAS_SAP_SCHEMA = """
     gas_day STRING, sap_p_kwh DOUBLE, applicable_at_local STRING, generated_at_local STRING,
     quality_indicator STRING
@@ -198,6 +202,16 @@ def gas_ttf():
 def weather_forecast_gb_hourly():
     return autoload("weather_forecast/gb_hourly", "json", WEATHER_FORECAST_SCHEMA,
                     pathGlobFilter="*.jsonl")
+
+
+@dlt.table(
+    name=f"{BRONZE}.weather_forecast_gb_hourly_archive",
+    comment="Past Open-Meteo forecast issues rebuilt from the Previous Runs API (07:40 UK "
+            "each day, D+1..D+7), one Parquet file per month of issue days.",
+)
+def weather_forecast_gb_hourly_archive():
+    return autoload("weather_forecast/gb_hourly_archive", "parquet",
+                    WEATHER_FORECAST_ARCHIVE_SCHEMA, pathGlobFilter="*.parquet")
 
 
 @dlt.table(
