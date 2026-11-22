@@ -139,9 +139,10 @@ resources:
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
         - task_key: ingest_weather_forecast_archive
-          # Each day's issue is rebuilt from the archive once its week is over (8 days on), so
-          # the outlook backtest keeps up. The default window refetches the last 7 such issues,
-          # catching up after missed runs: a few calls a day against Open-Meteo's 10,000.
+          # Each day's issue is rebuilt from the archive 2 days on, once every forecast it uses
+          # has been made, so the outlook backtest keeps up. The default window refetches the
+          # issues from 14 to 2 days ago, catching up after missed runs: a few calls a day
+          # against Open-Meteo's 10,000.
           email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
             on_failure: [ "${var.alert_email}" ]
           environment_key: ingest

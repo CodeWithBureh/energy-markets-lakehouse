@@ -303,7 +303,8 @@ def run_weather_forecast(lander: Lander, today: date) -> RunReport:
 def run_weather_forecast_archive(lander: Lander, start: date, end: date,
                                  today: date) -> RunReport:
     """Past forecast issues rebuilt from Open-Meteo's Previous Runs API, one file per month
-    of issue days. Only issues whose whole week is past, so every value is final."""
+    of issue days. Only issues at least ARCHIVE_DELAY_DAYS old, once every forecast they use
+    has been made, so every value is final."""
     import pandas as pd
 
     from energy_lakehouse.parsers.era5_netcdf import to_parquet_bytes
@@ -312,7 +313,7 @@ def run_weather_forecast_archive(lander: Lander, start: date, end: date,
 
     rep = RunReport("weather_forecast_archive")
     first = max(start, wf.ARCHIVE_SINCE)
-    last = min(end, today - timedelta(days=wf.OUTLOOK_DAYS + 1))
+    last = min(end, today - timedelta(days=wf.ARCHIVE_DELAY_DAYS))
     if first > last:
         log.info("Forecast archive: no complete issues in %s..%s", start, end)
         return rep

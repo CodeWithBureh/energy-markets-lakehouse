@@ -99,7 +99,7 @@ SETTLE_DAYS: dict[tuple[str, str], int] = {
     ("gas", "ttf"): 3,
     # ERA5T is replaced by final ERA5 2-3 months later; counted from the month's first day.
     ("era5", "gb_hourly"): 120,
-    # Only issues whose whole week is past are rebuilt, so they're final once landed.
+    # Only issues whose forecasts have all been made are rebuilt, so they're final once landed.
     ("weather_forecast", "gb_hourly_archive"): 0,
 }
 

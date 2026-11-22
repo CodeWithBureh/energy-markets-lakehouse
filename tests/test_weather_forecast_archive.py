@@ -99,9 +99,9 @@ def test_runner_lands_complete_issues_once_per_month(tmp_path, monkeypatch):
     today = date(2026, 11, 22)
     lander = cli.Lander(str(tmp_path), "20261122T120000000000Z")
     rep = cli.run_weather_forecast_archive(lander, date(2026, 10, 20), date(2026, 11, 21), today)
-    # Issues whose week isn't over (after 14 Nov) are left for the live forecast.
+    # Issues less than 2 days old (after 20 Nov) may use forecasts not published yet.
     assert calls == [(date(2026, 10, 20), date(2026, 10, 31)),
-                     (date(2026, 11, 1), date(2026, 11, 14))]
+                     (date(2026, 11, 1), date(2026, 11, 20))]
     assert len(rep.files) == 2 and all(f.endswith(".parquet") for f in rep.files)
 
     calls.clear()
