@@ -822,13 +822,21 @@
       "name": "cost_daily",
       "displayName": "Project cost per day, last 30 days",
       "queryLines": [
-        "-- Databricks list-price cost of this project per day and product, last 30 days.\n",
-        "-- Jobs and the warehouse carry the project tag; the pipeline is matched by name.\n",
+        "-- Databricks list-price cost of this project per day, product and environment, last 30\n",
+        "-- days. Jobs and the warehouse carry the project tag; the pipeline is matched by name.\n",
+        "-- The environment comes from the job or pipeline name: \"[ci] \" for the CI copy, \"[dev \"\n",
+        "-- for a developer's copy, no prefix for prod. The warehouse is shared by all of them.\n",
         "-- Excludes Azure storage, and predictive optimization, which isn't attributed to a project.\n",
-        "WITH pipelines AS (\n",
-        "  SELECT DISTINCT pipeline_id\n",
+        "WITH jobs AS (\n",
+        "  SELECT job_id, name\n",
+        "  FROM system.lakeflow.jobs\n",
+        "  QUALIFY row_number() OVER (PARTITION BY job_id ORDER BY change_time DESC) = 1\n",
+        "),\n",
+        "pipelines AS (\n",
+        "  SELECT pipeline_id, name\n",
         "  FROM system.lakeflow.pipelines\n",
         "  WHERE name LIKE '%energy-medallion'\n",
+        "  QUALIFY row_number() OVER (PARTITION BY pipeline_id ORDER BY change_time DESC) = 1\n",
         ")\n",
         "SELECT\n",
         "  u.usage_date,\n",
@@ -836,18 +844,25 @@
         "    WHEN 'DLT'  THEN 'Pipeline'\n",
         "    WHEN 'JOBS' THEN 'Jobs'\n",
         "    WHEN 'SQL'  THEN 'SQL warehouse'\n",
-        "    ELSE initcap(u.billing_origin_product) END             AS product,\n",
-        "  round(sum(u.usage_quantity * p.pricing.default), 2)      AS usd\n",
+        "    ELSE initcap(u.billing_origin_product) END                 AS product,\n",
+        "  CASE\n",
+        "    WHEN u.billing_origin_product = 'SQL'                THEN 'Shared (warehouse)'\n",
+        "    WHEN coalesce(pl.name, j.name) LIKE '[ci] %'         THEN 'CI'\n",
+        "    WHEN coalesce(pl.name, j.name) LIKE '[dev %'         THEN 'Dev'\n",
+        "    WHEN coalesce(pl.name, j.name) IS NULL               THEN 'Unknown'\n",
+        "    ELSE 'Prod' END                                            AS environment,\n",
+        "  round(sum(u.usage_quantity * p.pricing.default), 2)          AS usd\n",
         "FROM system.billing.usage u\n",
         "JOIN system.billing.list_prices p\n",
         "  ON u.sku_name = p.sku_name\n",
         " AND u.usage_start_time >= p.price_start_time\n",
         " AND (p.price_end_time IS NULL OR u.usage_start_time < p.price_end_time)\n",
         "LEFT JOIN pipelines pl ON pl.pipeline_id = u.usage_metadata.dlt_pipeline_id\n",
+        "LEFT JOIN jobs j ON j.job_id = u.usage_metadata.job_id\n",
         "WHERE u.usage_date >= date_sub(current_date(), 30)\n",
         "  AND (u.custom_tags['project'] = 'energy-markets-lakehouse' OR pl.pipeline_id IS NOT NULL)\n",
         "GROUP BY ALL\n",
-        "ORDER BY u.usage_date, product"
+        "ORDER BY u.usage_date, product, environment"
       ]
     }
   ],
@@ -2311,6 +2326,140 @@
         },
         {
           "widget": {
+            "name": "cost_env_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_daily",
+                  "fields": [
+                    {
+                      "name": "usage_date",
+                      "expression": "`usage_date`"
+                    },
+                    {
+                      "name": "usd",
+                      "expression": "`usd`"
+                    },
+                    {
+                      "name": "environment",
+                      "expression": "`environment`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "usage_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Day"
+                },
+                "y": {
+                  "fieldName": "usd",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "USD, list price"
+                },
+                "color": {
+                  "fieldName": "environment",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Environment"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cost per day by environment",
+                "showDescription": true,
+                "description": "CI runs on every merge to dev; the warehouse is shared"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "cost_product_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_daily",
+                  "fields": [
+                    {
+                      "name": "usage_date",
+                      "expression": "`usage_date`"
+                    },
+                    {
+                      "name": "usd",
+                      "expression": "`usd`"
+                    },
+                    {
+                      "name": "product",
+                      "expression": "`product`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "usage_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Day"
+                },
+                "y": {
+                  "fieldName": "usd",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "USD, list price"
+                },
+                "color": {
+                  "fieldName": "product",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Product"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cost per day by product",
+                "showDescription": true,
+                "description": "Jobs: ingest and checks code. Pipeline: bronze, silver and gold processing"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 12,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
             "name": "runs_chart",
             "queries": [
               {
@@ -2369,74 +2518,9 @@
           },
           "position": {
             "x": 0,
-            "y": 12,
-            "width": 3,
-            "height": 7
-          }
-        },
-        {
-          "widget": {
-            "name": "cost_chart",
-            "queries": [
-              {
-                "name": "main_query",
-                "query": {
-                  "datasetName": "cost_daily",
-                  "fields": [
-                    {
-                      "name": "usage_date",
-                      "expression": "`usage_date`"
-                    },
-                    {
-                      "name": "usd",
-                      "expression": "`usd`"
-                    },
-                    {
-                      "name": "product",
-                      "expression": "`product`"
-                    }
-                  ],
-                  "disaggregated": true
-                }
-              }
-            ],
-            "spec": {
-              "version": 3,
-              "widgetType": "bar",
-              "encodings": {
-                "x": {
-                  "fieldName": "usage_date",
-                  "scale": {
-                    "type": "temporal"
-                  },
-                  "displayName": "Day"
-                },
-                "y": {
-                  "fieldName": "usd",
-                  "scale": {
-                    "type": "quantitative"
-                  },
-                  "displayName": "USD"
-                },
-                "color": {
-                  "fieldName": "product",
-                  "scale": {
-                    "type": "categorical"
-                  },
-                  "displayName": "Product"
-                }
-              },
-              "frame": {
-                "showTitle": true,
-                "title": "Cost per day (USD, list price)"
-              }
-            }
-          },
-          "position": {
-            "x": 3,
-            "y": 12,
-            "width": 3,
-            "height": 7
+            "y": 19,
+            "width": 6,
+            "height": 6
           }
         }
       ]

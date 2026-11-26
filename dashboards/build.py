@@ -268,12 +268,19 @@ def platform_page() -> list[dict]:
             ("date", "Day", "date"), ("expected_settlement_periods", "Expected", "integer"),
             ("periods_loaded", "Loaded", "integer"),
         ], "Empty when every day in the last 30 is complete"), 3, 5, 3, 7),
+        place(chart("cost_env_chart", "bar", "cost_daily", "Cost per day by environment",
+                    ("usage_date", "temporal", "Day"), [("usd", "USD")], "USD, list price",
+                    color=("environment", "Environment"),
+                    description="CI runs on every merge to dev; the warehouse is shared"),
+              0, 12, 3, 7),
+        place(chart("cost_product_chart", "bar", "cost_daily", "Cost per day by product",
+                    ("usage_date", "temporal", "Day"), [("usd", "USD")], "USD, list price",
+                    color=("product", "Product"),
+                    description="Jobs: ingest and checks code. Pipeline: bronze, silver and "
+                                "gold processing"), 3, 12, 3, 7),
         place(chart("runs_chart", "bar", "job_runs", "Prod job runs by outcome",
                     ("run_date", "temporal", "Day"), [("runs", "Runs")], "Runs",
-                    color=("result_state", "Outcome")), 0, 12, 3, 7),
-        place(chart("cost_chart", "bar", "cost_daily", "Cost per day (USD, list price)",
-                    ("usage_date", "temporal", "Day"), [("usd", "USD")], "USD",
-                    color=("product", "Product")), 3, 12, 3, 7),
+                    color=("result_state", "Outcome")), 0, 19, 6, 6),
     ]
 
 
