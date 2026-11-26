@@ -21,3 +21,5 @@ infra/**/*.tfstate.*
 infra/**/*.tfplan
 infra/**/terraform.tfvars
 infra/**/backend.hcl
+# Per-user Claude Code settings (warehouse, profile)
+.claude/settings.local.json
