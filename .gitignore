@@ -13,3 +13,6 @@ landing/
 
 # Model bench snapshots and score cache (python -m research.export)
 research/data/
+
+# Per-user Claude Code settings (warehouse, profile)
+.claude/settings.local.json
