@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars (gitignored) and fill in. Commands for each id are in variables.tf.
+subscription_id                        = "<subscription id>"
+resource_group_name                    = "<resource group with the workspace and vault>"
+key_vault_name                         = "kv-energy-lakehouse"
+azure_databricks_app_object_id         = "<object id of the AzureDatabricks app in your tenant>"
+secrets_officer_object_id              = "<your user's object id>"
+state_storage_account_name             = "<globally unique, e.g. stenergytfstate123>"
+databricks_reads_secrets_assignment_id = "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/<vault>/providers/Microsoft.Authorization/roleAssignments/<guid>"
+owner_manages_secrets_assignment_id    = "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/<vault>/providers/Microsoft.Authorization/roleAssignments/<guid>"

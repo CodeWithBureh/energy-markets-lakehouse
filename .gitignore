@@ -13,3 +13,11 @@ landing/
 
 # Model bench snapshots and score cache (python -m research.export)
 research/data/
+
+# Terraform: providers, state, plans and local values (examples are committed)
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.*
+infra/**/*.tfplan
+infra/**/terraform.tfvars
+infra/**/backend.hcl

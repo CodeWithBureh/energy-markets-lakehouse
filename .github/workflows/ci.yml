@@ -73,6 +73,22 @@ jobs:
           /tmp/wheel-env/bin/plan_backfill --help > /dev/null
           /tmp/wheel-env/bin/check_lakehouse --help > /dev/null
 
+  terraform:
+    # Format and validate both stacks. No credentials: planning in CI needs OIDC (infra/README.md).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+      - run: terraform fmt -check -recursive infra
+      - name: Validate
+        run: |
+          for stack in infra/azure infra/databricks; do
+            terraform -chdir=$stack init -backend=false -input=false
+            terraform -chdir=$stack validate
+          done
+
   validate:
     # Pull requests from forks get no secrets, so only same-repo pull requests validate.
     if: >-

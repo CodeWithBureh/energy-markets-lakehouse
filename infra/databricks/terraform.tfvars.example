@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars (gitignored) and fill in. IDs from:
+#   databricks service-principals list   (applicationId, id)
+#   databricks secrets list-scopes       (keyvault_metadata)
+#   databricks warehouses list           (id)
+workspace_host                 = "https://adb-<workspace-id>.<n>.azuredatabricks.net"
+databricks_profile             = "<cli-profile>"
+prod_service_principal_id      = "<energy-prod-sp application id>"
+ci_service_principal_id        = "<energy-ci-sp application id>"
+prod_service_principal_scim_id = "<energy-prod-sp id>"
+ci_service_principal_scim_id   = "<energy-ci-sp id>"
+key_vault_id                   = "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/<vault>"
+key_vault_uri                  = "https://<vault>.vault.azure.net/"
+warehouse_id                   = "<warehouse id>"
