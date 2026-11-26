@@ -20,7 +20,13 @@ terraform {
 }
 
 provider "azurerm" {
-  features {}
+  features {
+    storage {
+      # The state account has shared keys off, so the provider's key-based data-plane
+      # calls would be refused. Everything here is managed through Resource Manager.
+      data_plane_available = false
+    }
+  }
   subscription_id = var.subscription_id
   # The subscription is shared and already has KeyVault, Storage and Authorization
   # registered; the default ("core") also registers unrelated services and can hang.
