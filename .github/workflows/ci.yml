@@ -60,9 +60,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - run: pip install -e ".[dev]"
-      - run: ruff check src tests
-      - run: pytest -q --cov=energy_lakehouse --cov-report=term-missing
+      - uses: actions/setup-java@v4            # local Spark for the pipeline tests
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: pip install -e ".[dev,spark]"
+      - run: ruff check src tests research
+      - run: pytest -q --cov=energy_lakehouse --cov=pipeline --cov-report=term-missing
       - name: Build the wheel and smoke-test its entry points
         # The jobs call these entry points; a packaging mistake would only show on Databricks.
         run: |
@@ -121,10 +125,23 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.seed_start_month != ''
         run: databricks bundle run -t ci energy_backfill --params "start_month=${{ inputs.seed_start_month }},end_month=current"
       - name: Run the daily job end to end
+        # The ci copy only runs on pushes to dev, not daily, so the rolling windows (Elexon's
+        # is 3 days) can miss days: the day of the last run, landed part-way through, would
+        # then never be completed and fails the settlement-day check. Start from that day
+        # instead, and at least 7 days back; at most 29, so ENTSO-E's window (to tomorrow)
+        # stays inside --max-days 31.
         # bundle run fails on a FAILED run; this also catches SUCCESS_WITH_FAILURES.
         run: |
-          databricks bundle run -t ci energy_daily
           job_id=$(databricks bundle summary -t ci -o json | jq -r '.resources.jobs.energy_daily.id')
+          last_ms=$(databricks jobs list-runs --job-id "$job_id" --completed-only -o json |
+            jq -r '[.[] | select(.state.result_state == "SUCCESS")][0].start_time // 0')
+          last=$(date -u -d "@$((last_ms / 1000))" +%F)
+          start=$(date -u -d "-7 days" +%F)
+          floor=$(date -u -d "-29 days" +%F)
+          [[ "$last" < "$start" ]] && start=$last
+          [[ "$start" < "$floor" ]] && start=$floor
+          echo "Last successful ci run started $last; ingesting from $start"
+          databricks bundle run -t ci energy_daily --params "start=$start"
           state=$(databricks jobs list-runs --job-id "$job_id" --limit 1 -o json | jq -r '.[0].state.result_state')
           echo "energy_daily finished: $state"
           if [ "$state" != "SUCCESS" ]; then

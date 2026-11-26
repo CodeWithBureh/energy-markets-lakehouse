@@ -20,6 +20,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.5", "build>=1.2"]
+# Local Spark for tests/pipeline (needs Java 17). Not in the wheel: Databricks provides Spark.
+spark = ["pyspark>=4.0,<4.1"]
 
 [project.scripts]
 # Used by the Databricks python_wheel_task (entry_point: ingest). The run wrappers raise on
@@ -36,7 +38,7 @@ include = ["energy_lakehouse*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]          # "." for research/
 
 [tool.ruff]
 line-length = 100
