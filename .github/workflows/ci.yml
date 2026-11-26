@@ -65,7 +65,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - run: pip install -e ".[dev,spark]"
-      - run: ruff check src tests research
+      - run: ruff check src tests research dashboards
       - run: pytest -q --cov=energy_lakehouse --cov=pipeline --cov-report=term-missing
       - name: Build the wheel and smoke-test its entry points
         # The jobs call these entry points; a packaging mistake would only show on Databricks.
