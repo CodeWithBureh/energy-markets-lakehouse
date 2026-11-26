@@ -13,10 +13,12 @@ terraform {
       version = "~> 4.0"
     }
   }
-  # Bootstrap: the first apply uses local state and creates the state storage below. Then
-  # uncomment, `terraform init -migrate-state -backend-config=backend.hcl`, and do the same
-  # in infra/databricks with key = "databricks.tfstate".
-  # backend "azurerm" { key = "azure.tfstate" }
+  # State lives in the storage account this stack creates (the first apply used local state
+  # and was migrated). The rest of the settings are in backend.hcl, from
+  # `terraform output -raw backend_config`: `terraform init -backend-config=backend.hcl`.
+  backend "azurerm" {
+    key = "azure.tfstate"
+  }
 }
 
 provider "azurerm" {

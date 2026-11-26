@@ -14,8 +14,11 @@ terraform {
       version = "~> 1.70"
     }
   }
-  # Local state until infra/azure creates the state container; then switch to:
-  # backend "azurerm" { key = "databricks.tfstate" } with the rest in backend.hcl.
+  # State in the storage account from infra/azure; the rest of the settings are in
+  # backend.hcl (see infra/README.md).
+  backend "azurerm" {
+    key = "databricks.tfstate"
+  }
 }
 
 provider "databricks" {

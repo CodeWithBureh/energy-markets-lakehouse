@@ -17,36 +17,41 @@ Everything here existed before Terraform and is adopted with `import` blocks, so
 plan of each stack should only import. Catalogs, the vault, the scope, the principals and
 the state storage have `prevent_destroy`, so no plan can delete them.
 
-## First run
+## State
 
-Needs Terraform 1.6 or later and the Azure CLI.
+Both stacks keep state in the `tfstate` container of `stenergylakehousetf` (created by
+`azure/`), one blob each: `azure.tfstate` and `databricks.tfstate`. Access is with your
+Entra login (`use_azuread_auth`); the account has shared keys off and blob versioning on,
+so any earlier state version can be recovered.
 
-1. **Azure stack** (creates the state storage):
-   ```bash
-   az login
-   cd infra/azure
-   cp terraform.tfvars.example terraform.tfvars   # fill in; commands for each id in variables.tf
-   terraform init
-   terraform plan    # expect: 3 to import (vault, 2 role assignments), 3 to add (state storage)
-   terraform apply
-   ```
-   If the plan wants to *change* the vault, the config doesn't match what's there yet: fix
-   the config, not the vault.
-2. **Move its state into the new storage:** write `backend.hcl` from
-   `terraform output -raw backend_config`, uncomment the `backend "azurerm"` block in
-   `main.tf`, then `terraform init -migrate-state -backend-config=backend.hcl`.
-3. **Databricks stack:**
-   ```bash
-   cd ../databricks
-   cp terraform.tfvars.example terraform.tfvars   # key_vault_* from the azure outputs
-   # uncomment its backend block (key = "databricks.tfstate"), copy backend.hcl
-   terraform init -backend-config=backend.hcl
-   terraform plan    # expect: 9 to import, 0 to add, 0 to change, 0 to destroy
-   terraform apply
-   ```
+## Working on a stack
 
-After that, change these resources here, not in the portal: a manual change shows up as a
-diff in the next plan.
+Needs Terraform 1.6 or later, the Azure CLI and, for `databricks/`, a Databricks CLI profile.
+
+```bash
+az login --tenant <tenant id>
+cd infra/<stack>
+cp terraform.tfvars.example terraform.tfvars   # fill in; commands for each id in variables.tf
+# backend.hcl (gitignored), the same in both stacks:
+#   resource_group_name  = "rg-unitycatalog-uksouth"
+#   storage_account_name = "stenergylakehousetf"
+#   container_name       = "tfstate"
+#   use_azuread_auth     = true
+terraform init -backend-config=backend.hcl     # PowerShell: quote it, "-backend-config=backend.hcl"
+terraform plan
+terraform apply
+```
+
+Change these resources here, not in the portal: a manual change shows up as a diff in the
+next plan. If a plan wants to change something you didn't touch, fix the config, not the
+resource.
+
+## How it was bootstrapped
+
+The state storage can't hold the state of the stack that creates it until it exists, so
+`azure/` was first applied with local state (3 imports, 3 new resources), then moved with
+`terraform init -migrate-state -backend-config=backend.hcl`. `databricks/` was planned
+against the remote backend from the start: 9 imports, 0 to add, 0 to change.
 
 ## Notes
 
