@@ -3,21 +3,27 @@
 -- Replays sql/week_ahead_report.sql for every past issue in fact_gb_week_ahead_outlook
 -- (rebuilt from Open-Meteo's archive back to Mar 2024, then the live daily fetches): the
 -- same model refitted on the 60 complete days before each issue, applied to that issue's
--- forecasts, and compared with the day's market index price once it is known.
+-- forecasts, blended 75/25 with the last 7 days' average price, and compared with the day's
+-- market index price once it is known.
 -- Replace `energy` with your catalog.
 --
 -- Columns, per days_ahead (1 = tomorrow):
---   mae_report            the report's estimate
+--   mae_report            the report's estimate (model blended with the last 7 days)
+--   mae_model_only        the model alone, without the blend
 --   mae_last_7_days       "same as the last 7 days" (the baseline to beat)
---   mae_actual_residual   the same model fed the residual demand that actually happened:
---                         the gap to mae_report is what forecasting demand and wind costs
+--   mae_actual_residual   the model alone fed the residual demand that actually happened:
+--                         the gap to mae_model_only is what forecasting demand and wind costs
 --   bias_report           mean of estimate minus actual (positive = too high)
 --   mae_residual_gw       how far off the residual demand forecast was
 --   share_late_hours      share of days using a weather forecast made after the issue time
 --                         (archived issues only, late on day 7: the archive keeps 7 days
 --                         of lead), so day 7 is slightly flattered
 
-WITH history AS (
+WITH params AS (
+  SELECT 0.25 AS last_7_days_weight                  -- as in sql/week_ahead_report.sql
+),
+
+history AS (
   SELECT
     m.date,
     m.gb_market_index_price_gbp_mwh                       AS y,
@@ -75,7 +81,10 @@ scored AS (
     o.forecast_lead_shortfall_hours,
     a.gb_market_index_price_gbp_mwh                                        AS actual,
     c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh
-                                                                            AS estimate,
+                                                                            AS model_estimate,
+    (1 - p.last_7_days_weight)
+      * (c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh)
+      + p.last_7_days_weight * r.last_7d_price                              AS estimate,
     c.a + c.b1 * a.gb_avg_residual_demand_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh
                                                                             AS estimate_actual_residual,
     r.last_7d_price,
@@ -83,6 +92,7 @@ scored AS (
   FROM energy.gold.fact_gb_week_ahead_outlook o
   JOIN coefs c ON c.issue_date = o.issue_date
   JOIN recent r ON r.issue_date = o.issue_date
+  CROSS JOIN params p
   JOIN energy.gold.fact_market_daily a
     ON a.date = o.target_date AND a.is_complete_day
   WHERE a.gb_market_index_price_gbp_mwh IS NOT NULL
@@ -96,6 +106,7 @@ SELECT
   min(issue_date)                                             AS first_issue,
   max(issue_date)                                             AS last_issue,
   round(avg(abs(estimate - actual)), 1)                       AS mae_report,
+  round(avg(abs(model_estimate - actual)), 1)                 AS mae_model_only,
   round(avg(abs(last_7d_price - actual)), 1)                  AS mae_last_7_days,
   round(avg(abs(estimate_actual_residual - actual)), 1)       AS mae_actual_residual,
   round(avg(estimate - actual), 1)                            AS bias_report,
