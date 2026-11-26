@@ -27,7 +27,7 @@ Needs Terraform 1.6 or later and the Azure CLI.
    cd infra/azure
    cp terraform.tfvars.example terraform.tfvars   # fill in; commands for each id in variables.tf
    terraform init
-   terraform plan    # expect: 3 to import (vault, 2 role assignments), 4 to add (state storage)
+   terraform plan    # expect: 3 to import (vault, 2 role assignments), 3 to add (state storage)
    terraform apply
    ```
    If the plan wants to *change* the vault, the config doesn't match what's there yet: fix

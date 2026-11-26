@@ -22,6 +22,9 @@ terraform {
 provider "azurerm" {
   features {}
   subscription_id = var.subscription_id
+  # The subscription is shared and already has KeyVault, Storage and Authorization
+  # registered; the default ("core") also registers unrelated services and can hang.
+  resource_provider_registrations = "none"
 }
 
 data "azurerm_client_config" "current" {}
