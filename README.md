@@ -219,13 +219,14 @@ over time.
 
 ```
 databricks.yml               bundle: dev, ci and prod targets
-resources/                   schemas and Volume, the pipeline, four jobs
+resources/                   schemas and Volume, the pipeline, four jobs, the dashboard
 src/energy_lakehouse/        ingestion library, built into a wheel
   sources/  parsers/         one client per source; ENTSO-E XML and ERA5 NetCDF parsers
   landing.py  cli.py         landing files, settle periods, the ingest entry point
   checks.py  backfill.py     data checks job; month planning for backfills
 src/pipeline/                bronze.py, silver.py, gold.py (Lakeflow Declarative Pipeline)
 sql/                         week-ahead report and backtest, dashboard and cost queries
+dashboards/                  AI/BI dashboard as code: build.py generates the .lvdash.json from sql/
 research/                    model bench: snapshot, walk-forward scoring, promotion gates
 infra/                       Terraform: azure/ (Key Vault, state storage), databricks/ (catalogs, grants, identities, warehouse)
 tests/                       pytest; tests/pipeline runs the pipeline on local Spark
