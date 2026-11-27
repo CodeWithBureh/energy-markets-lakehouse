@@ -125,26 +125,17 @@ def chart(name: str, kind: str, dataset: str, title: str, x: tuple[str, str, str
             "spec": spec}
 
 
-def table(name: str, dataset: str, title: str, columns: list[tuple[str, str, str]],
+def table(name: str, dataset: str, title: str, columns: list[tuple[str, str]],
           description: str | None = None) -> dict:
-    """columns = [(column, header, type)], type one of string, integer, float, date."""
-    encodings = []
-    for order, (col, header, kind) in enumerate(columns):
-        display = {"integer": "number", "float": "number"}.get(kind, kind)
-        enc = {"fieldName": col, "title": header, "displayName": header, "type": kind,
-               "displayAs": display, "visible": True, "order": order, "alignContent":
-               "right" if kind in ("integer", "float") else "left"}
-        if kind == "float":
-            enc["numberFormat"] = "0.0"
-        if kind == "date":
-            enc["dateTimeFormat"] = "YYYY-MM-DD"
-        encodings.append(enc)
+    """columns = [(column, header)]; the SQL does any rounding. Table spec version 2: the
+    published dashboard shows version 1 tables as "Visualization has no fields selected"."""
     return {
         "name": name,
-        "queries": _query(dataset, [(c, f"`{c}`") for c, _, _ in columns]),
-        "spec": {"version": 1, "widgetType": "table", "encodings": {"columns": encodings},
-                 "invisibleColumns": [], "allowHTMLByDefault": False, "itemsPerPage": 25,
-                 "condensed": True, "withRowNumber": False, "frame": _frame(title, description)},
+        "queries": _query(dataset, [(c, f"`{c}`") for c, _ in columns]),
+        "spec": {"version": 2, "widgetType": "table",
+                 "encodings": {"columns": [{"fieldName": c, "displayName": h}
+                                           for c, h in columns]},
+                 "frame": _frame(title, description)},
     }
 
 
@@ -180,12 +171,12 @@ def outlook_page() -> list[dict]:
                      ("last_7_days_avg_price_gbp_mwh", "Last 7 days' average")],
                     "GBP/MWh"), 0, 5, 3, 7),
         place(table("outlook_table", "outlook", "Estimates and what drives them", [
-            ("day", "Day", "date"), ("weekday", "Weekday", "string"),
-            ("price_estimate_gbp_mwh", "Estimate", "integer"),
-            ("price_low_gbp_mwh", "Low", "integer"), ("price_high_gbp_mwh", "High", "integer"),
-            ("residual_demand_gw", "Residual demand, GW", "float"),
-            ("wind_gw", "Wind, GW", "float"), ("gas_sap_gbp_mwh", "Gas SAP", "float"),
-            ("wind_source", "Wind forecast", "string"),
+            ("day", "Day"), ("weekday", "Weekday"),
+            ("price_estimate_gbp_mwh", "Estimate"),
+            ("price_low_gbp_mwh", "Low"), ("price_high_gbp_mwh", "High"),
+            ("residual_demand_gw", "Residual demand, GW"),
+            ("wind_gw", "Wind, GW"), ("gas_sap_gbp_mwh", "Gas SAP"),
+            ("wind_source", "Wind forecast"),
         ]), 3, 5, 3, 7),
         place(chart("horizon_chart", "bar", "backtest_by_horizon", "Error by days ahead",
                     ("days_ahead", "categorical", "Days ahead"),
@@ -260,13 +251,13 @@ def platform_page() -> list[dict]:
                                      "Databricks list price; excludes Azure storage")},
         }, 4, 2, 2, 3),
         place(table("freshness_table", "freshness", "Latest data per source", [
-            ("source", "Source", "string"), ("latest_day", "Latest day", "date"),
-            ("days_behind", "Days behind", "integer"),
-            ("allowed_days_behind", "Allowed", "integer"), ("status", "Status", "string"),
+            ("source", "Source"), ("latest_day", "Latest day"),
+            ("days_behind", "Days behind"),
+            ("allowed_days_behind", "Allowed"), ("status", "Status"),
         ], "ERA5 is published about 6 days behind and loaded weekly"), 0, 5, 3, 7),
         place(table("incomplete_table", "incomplete_days", "Incomplete settlement days", [
-            ("date", "Day", "date"), ("expected_settlement_periods", "Expected", "integer"),
-            ("periods_loaded", "Loaded", "integer"),
+            ("date", "Day"), ("expected_settlement_periods", "Expected"),
+            ("periods_loaded", "Loaded"),
         ], "Empty when every day in the last 30 is complete"), 3, 5, 3, 7),
         place(chart("cost_env_chart", "bar", "cost_daily", "Cost per day by environment",
                     ("usage_date", "temporal", "Day"), [("usd", "USD")], "USD, list price",

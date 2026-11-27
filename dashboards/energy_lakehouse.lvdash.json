@@ -1167,111 +1167,48 @@
               }
             ],
             "spec": {
-              "version": 1,
+              "version": 2,
               "widgetType": "table",
               "encodings": {
                 "columns": [
                   {
                     "fieldName": "day",
-                    "title": "Day",
-                    "displayName": "Day",
-                    "type": "date",
-                    "displayAs": "date",
-                    "visible": true,
-                    "order": 0,
-                    "alignContent": "left",
-                    "dateTimeFormat": "YYYY-MM-DD"
+                    "displayName": "Day"
                   },
                   {
                     "fieldName": "weekday",
-                    "title": "Weekday",
-                    "displayName": "Weekday",
-                    "type": "string",
-                    "displayAs": "string",
-                    "visible": true,
-                    "order": 1,
-                    "alignContent": "left"
+                    "displayName": "Weekday"
                   },
                   {
                     "fieldName": "price_estimate_gbp_mwh",
-                    "title": "Estimate",
-                    "displayName": "Estimate",
-                    "type": "integer",
-                    "displayAs": "number",
-                    "visible": true,
-                    "order": 2,
-                    "alignContent": "right"
+                    "displayName": "Estimate"
                   },
                   {
                     "fieldName": "price_low_gbp_mwh",
-                    "title": "Low",
-                    "displayName": "Low",
-                    "type": "integer",
-                    "displayAs": "number",
-                    "visible": true,
-                    "order": 3,
-                    "alignContent": "right"
+                    "displayName": "Low"
                   },
                   {
                     "fieldName": "price_high_gbp_mwh",
-                    "title": "High",
-                    "displayName": "High",
-                    "type": "integer",
-                    "displayAs": "number",
-                    "visible": true,
-                    "order": 4,
-                    "alignContent": "right"
+                    "displayName": "High"
                   },
                   {
                     "fieldName": "residual_demand_gw",
-                    "title": "Residual demand, GW",
-                    "displayName": "Residual demand, GW",
-                    "type": "float",
-                    "displayAs": "number",
-                    "visible": true,
-                    "order": 5,
-                    "alignContent": "right",
-                    "numberFormat": "0.0"
+                    "displayName": "Residual demand, GW"
                   },
                   {
                     "fieldName": "wind_gw",
-                    "title": "Wind, GW",
-                    "displayName": "Wind, GW",
-                    "type": "float",
-                    "displayAs": "number",
-                    "visible": true,
-                    "order": 6,
-                    "alignContent": "right",
-                    "numberFormat": "0.0"
+                    "displayName": "Wind, GW"
                   },
                   {
                     "fieldName": "gas_sap_gbp_mwh",
-                    "title": "Gas SAP",
-                    "displayName": "Gas SAP",
-                    "type": "float",
-                    "displayAs": "number",
-                    "visible": true,
-                    "order": 7,
-                    "alignContent": "right",
-                    "numberFormat": "0.0"
+                    "displayName": "Gas SAP"
                   },
                   {
                     "fieldName": "wind_source",
-                    "title": "Wind forecast",
-                    "displayName": "Wind forecast",
-                    "type": "string",
-                    "displayAs": "string",
-                    "visible": true,
-                    "order": 8,
-                    "alignContent": "left"
+                    "displayName": "Wind forecast"
                   }
                 ]
               },
-              "invisibleColumns": [],
-              "allowHTMLByDefault": false,
-              "itemsPerPage": 25,
-              "condensed": true,
-              "withRowNumber": false,
               "frame": {
                 "showTitle": true,
                 "title": "Estimates and what drives them"
@@ -2165,68 +2102,32 @@
               }
             ],
             "spec": {
-              "version": 1,
+              "version": 2,
               "widgetType": "table",
               "encodings": {
                 "columns": [
                   {
                     "fieldName": "source",
-                    "title": "Source",
-                    "displayName": "Source",
-                    "type": "string",
-                    "displayAs": "string",
-                    "visible": true,
-                    "order": 0,
-                    "alignContent": "left"
+                    "displayName": "Source"
                   },
                   {
                     "fieldName": "latest_day",
-                    "title": "Latest day",
-                    "displayName": "Latest day",
-                    "type": "date",
-                    "displayAs": "date",
-                    "visible": true,
-                    "order": 1,
-                    "alignContent": "left",
-                    "dateTimeFormat": "YYYY-MM-DD"
+                    "displayName": "Latest day"
                   },
                   {
                     "fieldName": "days_behind",
-                    "title": "Days behind",
-                    "displayName": "Days behind",
-                    "type": "integer",
-                    "displayAs": "number",
-                    "visible": true,
-                    "order": 2,
-                    "alignContent": "right"
+                    "displayName": "Days behind"
                   },
                   {
                     "fieldName": "allowed_days_behind",
-                    "title": "Allowed",
-                    "displayName": "Allowed",
-                    "type": "integer",
-                    "displayAs": "number",
-                    "visible": true,
-                    "order": 3,
-                    "alignContent": "right"
+                    "displayName": "Allowed"
                   },
                   {
                     "fieldName": "status",
-                    "title": "Status",
-                    "displayName": "Status",
-                    "type": "string",
-                    "displayAs": "string",
-                    "visible": true,
-                    "order": 4,
-                    "alignContent": "left"
+                    "displayName": "Status"
                   }
                 ]
               },
-              "invisibleColumns": [],
-              "allowHTMLByDefault": false,
-              "itemsPerPage": 25,
-              "condensed": true,
-              "withRowNumber": false,
               "frame": {
                 "showTitle": true,
                 "title": "Latest data per source",
@@ -2269,48 +2170,24 @@
               }
             ],
             "spec": {
-              "version": 1,
+              "version": 2,
               "widgetType": "table",
               "encodings": {
                 "columns": [
                   {
                     "fieldName": "date",
-                    "title": "Day",
-                    "displayName": "Day",
-                    "type": "date",
-                    "displayAs": "date",
-                    "visible": true,
-                    "order": 0,
-                    "alignContent": "left",
-                    "dateTimeFormat": "YYYY-MM-DD"
+                    "displayName": "Day"
                   },
                   {
                     "fieldName": "expected_settlement_periods",
-                    "title": "Expected",
-                    "displayName": "Expected",
-                    "type": "integer",
-                    "displayAs": "number",
-                    "visible": true,
-                    "order": 1,
-                    "alignContent": "right"
+                    "displayName": "Expected"
                   },
                   {
                     "fieldName": "periods_loaded",
-                    "title": "Loaded",
-                    "displayName": "Loaded",
-                    "type": "integer",
-                    "displayAs": "number",
-                    "visible": true,
-                    "order": 2,
-                    "alignContent": "right"
+                    "displayName": "Loaded"
                   }
                 ]
               },
-              "invisibleColumns": [],
-              "allowHTMLByDefault": false,
-              "itemsPerPage": 25,
-              "condensed": true,
-              "withRowNumber": false,
               "frame": {
                 "showTitle": true,
                 "title": "Incomplete settlement days",
