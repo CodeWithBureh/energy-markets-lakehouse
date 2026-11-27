@@ -88,8 +88,10 @@ catalog (`energy_dev`, `energy_dev.ci_*`, `energy`) and by identity: prod and ci
 their own service principals with grants on their catalog only.
 
 - **Why:** one workspace keeps the fixed cost near zero.
-- **Cost:** weaker isolation than separate workspaces. Workspace and grants are created by
-  hand, which Terraform would fix (on the roadmap).
+- **Cost:** weaker isolation than separate workspaces. The catalogs, grants and identities
+  that provide the isolation are managed in Terraform ([infra/](../infra/)), so they are
+  reviewed and can't drift unnoticed. The workspace and metastore are shared with other
+  projects and stay outside it.
 
 ## 8. Promote only after a full run passes data checks
 
