@@ -180,7 +180,7 @@ def outlook_page() -> list[dict]:
                      ("last_7_days_avg_price_gbp_mwh", "Last 7 days' average")],
                     "GBP/MWh"), 0, 5, 3, 7),
         place(table("outlook_table", "outlook", "Estimates and what drives them", [
-            ("day", "Day", "date"), ("weekday", "", "string"),
+            ("day", "Day", "date"), ("weekday", "Weekday", "string"),
             ("price_estimate_gbp_mwh", "Estimate", "integer"),
             ("price_low_gbp_mwh", "Low", "integer"), ("price_high_gbp_mwh", "High", "integer"),
             ("residual_demand_gw", "Residual demand, GW", "float"),
