@@ -110,10 +110,14 @@ def build_checks(catalog: str, silver: str, gold: str, max_age_days: int,
         Check(f"EU day-ahead prices are fresh (latest day on or after {oldest_ok})",
               f"SELECT IF(MAX(DATE(hour_utc)) >= DATE'{oldest_ok}', 0, 1) "
               f"FROM {g('fact_eu_day_ahead_hourly')}"),
+        # Days before the latest day loaded, not before today: yesterday's last half-hours
+        # only arrive with the morning run, so a check between midnight and then would fail
+        # on a day that isn't finished loading. A stalled load is the freshness check's job.
         Check("No incomplete GB settlement days in the last 30 days",
               f"SELECT COUNT(*) FROM {g('dq_settlement_period_completeness')} "
               f"WHERE date >= DATE'{(today - timedelta(days=30)).isoformat()}' "
-              f"AND date < DATE'{today.isoformat()}'"),
+              f"AND date < DATE'{today.isoformat()}' "
+              f"AND date < (SELECT MAX(settlement_date) FROM {g('fact_gb_half_hourly')})"),
         Check(f"GB prices in the last 30 days are present and within {lo:g} to {hi:g} GBP/MWh",
               f"SELECT COUNT(*) FROM {g('fact_gb_half_hourly')} "
               f"WHERE settlement_date >= DATE'{(today - timedelta(days=30)).isoformat()}' "

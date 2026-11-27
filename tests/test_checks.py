@@ -32,6 +32,15 @@ def test_week_ahead_checks_are_required():
         assert built[f"{t} has rows"].required
 
 
+def test_completeness_check_stops_before_the_latest_day_loaded():
+    # Run just after midnight, yesterday is still loading until the morning run: only days
+    # before the latest one loaded must be complete (the 27 Nov 00:55 prod deploy failed).
+    built = {c.name: c for c in build_checks("c", "s", "g", 3, TODAY)}
+    sql = built["No incomplete GB settlement days in the last 30 days"].sql
+    assert "date < (SELECT MAX(settlement_date) FROM `c`.`g`.`fact_gb_half_hourly`)" in sql
+    assert "date < DATE'2026-11-21'" in sql
+
+
 def test_uniqueness_checks_only_look_at_current_scd2_rows():
     unique = [c for c in build_checks("c", "s", "g", 3, TODAY) if "unique" in c.name]
     assert len(unique) == len(checks.SILVER_KEYS)
