@@ -1184,8 +1184,8 @@
                   },
                   {
                     "fieldName": "weekday",
-                    "title": "",
-                    "displayName": "",
+                    "title": "Weekday",
+                    "displayName": "Weekday",
                     "type": "string",
                     "displayAs": "string",
                     "visible": true,
