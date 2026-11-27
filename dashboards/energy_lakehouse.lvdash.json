@@ -1,0 +1,2531 @@
+{
+  "datasets": [
+    {
+      "name": "outlook",
+      "displayName": "Week-ahead outlook (sql/week_ahead_report.sql)",
+      "queryLines": [
+        "-- Week-ahead GB power price report: one row for each of the next 7 days.\n",
+        "--\n",
+        "-- Run it daily after the energy_daily job (about 08:30 UK), e.g. as a scheduled Databricks\n",
+        "-- SQL query, a dashboard dataset or an alert. Replace `energy` with your catalog.\n",
+        "--\n",
+        "-- How the estimate works\n",
+        "--   model = a + b1 * residual demand (GW) + b2 * gas (SAP, GBP/MWh, previous gas day)\n",
+        "--   fitted on the 60 complete days before the forecast was issued, then applied to the\n",
+        "--   forecast residual demand and the latest SAP.\n",
+        "--   estimate = 75% model + 25% the last 7 days' average price. The blend damps the model\n",
+        "--   when price stops tracking residual demand; it beat the model alone in every year of the\n",
+        "--   backtest (sql/week_ahead_backtest.sql), most on days 5-7, and 20-25% was the best weight\n",
+        "--   in both halves of the history.\n",
+        "--   Residual demand = demand minus metered (transmission) wind. Demand comes from Elexon's\n",
+        "--   2-14 day peak forecast (NDFD) scaled to a daily average; wind from Elexon's WINDFOR\n",
+        "--   (corrected) for the hours it covers, otherwise from the Open-Meteo wind forecast\n",
+        "--   through the lakehouse's own power curve.\n",
+        "--   The low/high range is +/- one standard deviation of the estimate's actual errors at\n",
+        "--   the same days ahead, over the issues from 67 to 8 days before this one (every one of\n",
+        "--   their days has a price by now), so it widens from day 1 to day 7. It held about 72% of\n",
+        "--   outcomes in the backtest. With fewer than 30 such errors (a fresh copy without the\n",
+        "--   forecast archive), it falls back to the model's own fit error, which is too narrow.\n",
+        "--   Gas is held at the latest SAP for the whole week.\n",
+        "\n",
+        "WITH params AS (\n",
+        "  SELECT 60 AS fit_days, 0.25 AS last_7_days_weight, 60 AS error_issues\n",
+        "),\n",
+        "\n",
+        "latest_issue AS (\n",
+        "  SELECT max(issue_date) AS issue_date FROM fact_gb_week_ahead_outlook\n",
+        "),\n",
+        "\n",
+        "history AS (\n",
+        "  SELECT\n",
+        "    m.date,\n",
+        "    m.gb_market_index_price_gbp_mwh                       AS y,\n",
+        "    m.gb_avg_residual_demand_mw / 1000                    AS x1,   -- GW\n",
+        "    lag(m.gb_gas_sap_gbp_mwh) OVER (ORDER BY m.date)      AS x2    -- previous gas day\n",
+        "  FROM fact_market_daily m\n",
+        "  WHERE m.is_complete_day\n",
+        "),\n",
+        "\n",
+        "-- This issue, and the past issues whose errors set the range.\n",
+        "issues AS (\n",
+        "  SELECT DISTINCT o.issue_date, o.issue_date = i.issue_date AS is_latest\n",
+        "  FROM fact_gb_week_ahead_outlook o\n",
+        "  CROSS JOIN latest_issue i CROSS JOIN params p\n",
+        "  WHERE o.issue_date = i.issue_date\n",
+        "     OR (o.issue_date <  date_sub(i.issue_date, 7)\n",
+        "         AND o.issue_date >= date_sub(i.issue_date, 7 + p.error_issues))\n",
+        "),\n",
+        "\n",
+        "-- Least squares with two regressors per issue, from covariances (closed form).\n",
+        "moments AS (\n",
+        "  SELECT\n",
+        "    s.issue_date,\n",
+        "    count(*) AS n,\n",
+        "    avg(h.y) AS my, avg(h.x1) AS m1, avg(h.x2) AS m2,\n",
+        "    var_pop(h.x1) AS v1, var_pop(h.x2) AS v2,\n",
+        "    covar_pop(h.x1, h.x2) AS c12, covar_pop(h.x1, h.y) AS c1y, covar_pop(h.x2, h.y) AS c2y\n",
+        "  FROM issues s\n",
+        "  CROSS JOIN params p\n",
+        "  JOIN history h\n",
+        "    ON h.date < s.issue_date AND h.date >= date_sub(s.issue_date, p.fit_days)\n",
+        "  WHERE h.y IS NOT NULL AND h.x1 IS NOT NULL AND h.x2 IS NOT NULL\n",
+        "  GROUP BY s.issue_date\n",
+        "),\n",
+        "\n",
+        "model AS (\n",
+        "  SELECT\n",
+        "    issue_date, n, my, m1, m2,\n",
+        "    (c1y * v2 - c2y * c12) / (v1 * v2 - c12 * c12) AS b1,\n",
+        "    (c2y * v1 - c1y * c12) / (v1 * v2 - c12 * c12) AS b2\n",
+        "  FROM moments\n",
+        "),\n",
+        "\n",
+        "coefs AS (\n",
+        "  SELECT issue_date, n, b1, b2, my - b1 * m1 - b2 * m2 AS a FROM model\n",
+        "),\n",
+        "\n",
+        "recent AS (\n",
+        "  SELECT\n",
+        "    s.issue_date,\n",
+        "    avg(m.gb_market_index_price_gbp_mwh)   AS last_7d_price,\n",
+        "    avg(m.gb_avg_residual_demand_mw)/1000  AS last_7d_residual_gw\n",
+        "  FROM issues s\n",
+        "  JOIN fact_market_daily m\n",
+        "    ON m.date >= date_sub(s.issue_date, 7) AND m.date < s.issue_date\n",
+        "  GROUP BY s.issue_date\n",
+        "),\n",
+        "\n",
+        "estimates AS (\n",
+        "  SELECT\n",
+        "    o.*,\n",
+        "    s.is_latest,\n",
+        "    c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh\n",
+        "                                                                            AS model_estimate,\n",
+        "    (1 - p.last_7_days_weight)\n",
+        "      * (c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh)\n",
+        "      + p.last_7_days_weight * r.last_7d_price                              AS estimate\n",
+        "  FROM fact_gb_week_ahead_outlook o\n",
+        "  JOIN issues s ON s.issue_date = o.issue_date\n",
+        "  JOIN coefs c ON c.issue_date = o.issue_date\n",
+        "  JOIN recent r ON r.issue_date = o.issue_date\n",
+        "  CROSS JOIN params p\n",
+        "),\n",
+        "\n",
+        "-- How far off the estimate was at each days ahead, over the past issues.\n",
+        "past_error AS (\n",
+        "  SELECT\n",
+        "    e.days_ahead,\n",
+        "    count(*)                                              AS n,\n",
+        "    stddev_pop(e.estimate - a.gb_market_index_price_gbp_mwh) AS sd\n",
+        "  FROM estimates e\n",
+        "  JOIN fact_market_daily a\n",
+        "    ON a.date = e.target_date AND a.is_complete_day\n",
+        "  WHERE NOT e.is_latest AND a.gb_market_index_price_gbp_mwh IS NOT NULL\n",
+        "  GROUP BY e.days_ahead\n",
+        "),\n",
+        "\n",
+        "-- Fallback: the model's own fit error on its training days.\n",
+        "fit_error AS (\n",
+        "  SELECT stddev_pop(h.y - (c.a + c.b1 * h.x1 + c.b2 * h.x2)) AS sd\n",
+        "  FROM coefs c\n",
+        "  CROSS JOIN latest_issue i\n",
+        "  CROSS JOIN params p\n",
+        "  JOIN history h\n",
+        "    ON h.date < i.issue_date AND h.date >= date_sub(i.issue_date, p.fit_days)\n",
+        "  WHERE c.issue_date = i.issue_date\n",
+        "    AND h.y IS NOT NULL AND h.x1 IS NOT NULL AND h.x2 IS NOT NULL\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "  o.target_date                                         AS day,\n",
+        "  date_format(o.target_date, 'EEE')                     AS weekday,\n",
+        "  o.days_ahead,\n",
+        "  round(o.demand_avg_forecast_mw / 1000, 1)             AS demand_gw,\n",
+        "  round(o.wind_forecast_mw / 1000, 1)                   AS wind_gw,\n",
+        "  o.wind_source,\n",
+        "  round(o.residual_demand_forecast_mw / 1000, 1)        AS residual_demand_gw,\n",
+        "  round(o.avg_wind_speed_100m_ms, 1)                    AS wind_speed_ms,\n",
+        "  round(o.avg_temp_c, 1)                                AS temp_c,\n",
+        "  round(o.latest_sap_gbp_mwh, 1)                        AS gas_sap_gbp_mwh,\n",
+        "  round(o.latest_ttf_eur_mwh, 1)                        AS gas_ttf_eur_mwh,\n",
+        "  round(o.estimate, 0)                                  AS price_estimate_gbp_mwh,\n",
+        "  round(o.estimate - rng.sd, 0)                         AS price_low_gbp_mwh,\n",
+        "  round(o.estimate + rng.sd, 0)                         AS price_high_gbp_mwh,\n",
+        "  round(o.model_estimate, 0)                            AS model_only_estimate_gbp_mwh,\n",
+        "  round(r.last_7d_price, 0)                             AS last_7_days_avg_price_gbp_mwh,\n",
+        "  -- Model context, the same on every row\n",
+        "  round(c.b1, 2)                                        AS gbp_per_gw_residual,\n",
+        "  round(c.b2, 2)                                        AS gbp_per_gbp_gas,\n",
+        "  c.n                                                   AS days_in_fit,\n",
+        "  rng.source                                            AS range_source,\n",
+        "  o.issue_date,\n",
+        "  o.issued_utc                                          AS weather_issued_utc,\n",
+        "  o.demand_forecast_published_utc\n",
+        "FROM estimates o\n",
+        "JOIN coefs c ON c.issue_date = o.issue_date\n",
+        "JOIN recent r ON r.issue_date = o.issue_date\n",
+        "CROSS JOIN fit_error f\n",
+        "LEFT JOIN past_error pe ON pe.days_ahead = o.days_ahead\n",
+        "CROSS JOIN LATERAL (\n",
+        "  SELECT\n",
+        "    CASE WHEN pe.n >= 30 THEN pe.sd ELSE f.sd END AS sd,\n",
+        "    CASE WHEN pe.n >= 30 THEN format_string('past errors (%d)', pe.n)\n",
+        "         ELSE 'model fit error (too few past errors)' END AS source\n",
+        ") rng\n",
+        "WHERE o.is_latest\n",
+        "ORDER BY o.target_date"
+      ]
+    },
+    {
+      "name": "backtest_kpis",
+      "displayName": "Backtest headline numbers",
+      "queryLines": [
+        "-- Backtest of the week-ahead GB power price report: how far off it was, by days ahead.\n",
+        "--\n",
+        "-- Replays sql/week_ahead_report.sql for every past issue in fact_gb_week_ahead_outlook\n",
+        "-- (rebuilt from Open-Meteo's archive back to Mar 2024, then the live daily fetches): the\n",
+        "-- same model refitted on the 60 complete days before each issue, applied to that issue's\n",
+        "-- forecasts, blended 75/25 with the last 7 days' average price, and compared with the day's\n",
+        "-- market index price once it is known.\n",
+        "-- Replace `energy` with your catalog.\n",
+        "--\n",
+        "-- Columns, per days_ahead (1 = tomorrow):\n",
+        "--   mae_report            the report's estimate (model blended with the last 7 days)\n",
+        "--   mae_model_only        the model alone, without the blend\n",
+        "--   mae_last_7_days       \"same as the last 7 days\" (the baseline to beat)\n",
+        "--   mae_actual_residual   the model alone fed the residual demand that actually happened:\n",
+        "--                         the gap to mae_model_only is what forecasting demand and wind costs\n",
+        "--   bias_report           mean of estimate minus actual (positive = too high)\n",
+        "--   mae_residual_gw       how far off the residual demand forecast was\n",
+        "--   share_late_hours      share of days using a weather forecast made after the issue time\n",
+        "--                         (archived issues only, late on day 7: the archive keeps 7 days\n",
+        "--                         of lead), so day 7 is slightly flattered\n",
+        "\n",
+        "WITH params AS (\n",
+        "  SELECT 0.25 AS last_7_days_weight                  -- as in sql/week_ahead_report.sql\n",
+        "),\n",
+        "\n",
+        "history AS (\n",
+        "  SELECT\n",
+        "    m.date,\n",
+        "    m.gb_market_index_price_gbp_mwh                       AS y,\n",
+        "    m.gb_avg_residual_demand_mw / 1000                    AS x1,   -- GW\n",
+        "    lag(m.gb_gas_sap_gbp_mwh) OVER (ORDER BY m.date)      AS x2    -- previous gas day\n",
+        "  FROM fact_market_daily m\n",
+        "  WHERE m.is_complete_day\n",
+        "),\n",
+        "\n",
+        "issues AS (\n",
+        "  SELECT DISTINCT issue_date FROM fact_gb_week_ahead_outlook\n",
+        "),\n",
+        "\n",
+        "-- Two-regressor least squares per issue, from covariances (as in the report).\n",
+        "moments AS (\n",
+        "  SELECT\n",
+        "    i.issue_date,\n",
+        "    count(*) AS n,\n",
+        "    avg(h.y) AS my, avg(h.x1) AS m1, avg(h.x2) AS m2,\n",
+        "    var_pop(h.x1) AS v1, var_pop(h.x2) AS v2,\n",
+        "    covar_pop(h.x1, h.x2) AS c12, covar_pop(h.x1, h.y) AS c1y, covar_pop(h.x2, h.y) AS c2y\n",
+        "  FROM issues i\n",
+        "  JOIN history h\n",
+        "    ON h.date < i.issue_date AND h.date >= date_sub(i.issue_date, 60)\n",
+        "  WHERE h.y IS NOT NULL AND h.x1 IS NOT NULL AND h.x2 IS NOT NULL\n",
+        "  GROUP BY i.issue_date\n",
+        "),\n",
+        "\n",
+        "coefs AS (\n",
+        "  SELECT\n",
+        "    issue_date, n, b1, b2, my - b1 * m1 - b2 * m2 AS a\n",
+        "  FROM (\n",
+        "    SELECT\n",
+        "      issue_date, n, my, m1, m2,\n",
+        "      (c1y * v2 - c2y * c12) / (v1 * v2 - c12 * c12) AS b1,\n",
+        "      (c2y * v1 - c1y * c12) / (v1 * v2 - c12 * c12) AS b2\n",
+        "    FROM moments\n",
+        "  )\n",
+        "  WHERE n >= 30                                     -- skip issues with a thin fit window\n",
+        "),\n",
+        "\n",
+        "recent AS (\n",
+        "  SELECT i.issue_date, avg(m.gb_market_index_price_gbp_mwh) AS last_7d_price\n",
+        "  FROM issues i\n",
+        "  JOIN fact_market_daily m\n",
+        "    ON m.date >= date_sub(i.issue_date, 7) AND m.date < i.issue_date\n",
+        "  GROUP BY i.issue_date\n",
+        "),\n",
+        "\n",
+        "scored AS (\n",
+        "  SELECT\n",
+        "    o.issue_date,\n",
+        "    o.days_ahead,\n",
+        "    o.is_archived_forecast,\n",
+        "    o.forecast_lead_shortfall_hours,\n",
+        "    a.gb_market_index_price_gbp_mwh                                        AS actual,\n",
+        "    c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh\n",
+        "                                                                            AS model_estimate,\n",
+        "    (1 - p.last_7_days_weight)\n",
+        "      * (c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh)\n",
+        "      + p.last_7_days_weight * r.last_7d_price                              AS estimate,\n",
+        "    c.a + c.b1 * a.gb_avg_residual_demand_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh\n",
+        "                                                                            AS estimate_actual_residual,\n",
+        "    r.last_7d_price,\n",
+        "    (o.residual_demand_forecast_mw - a.gb_avg_residual_demand_mw) / 1000   AS residual_error_gw\n",
+        "  FROM fact_gb_week_ahead_outlook o\n",
+        "  JOIN coefs c ON c.issue_date = o.issue_date\n",
+        "  JOIN recent r ON r.issue_date = o.issue_date\n",
+        "  CROSS JOIN params p\n",
+        "  JOIN fact_market_daily a\n",
+        "    ON a.date = o.target_date AND a.is_complete_day\n",
+        "  WHERE a.gb_market_index_price_gbp_mwh IS NOT NULL\n",
+        "    AND o.residual_demand_forecast_mw IS NOT NULL\n",
+        "    AND o.latest_sap_gbp_mwh IS NOT NULL\n",
+        ")\n",
+        "\n",
+        "-- needs: backtest\n",
+        "-- One row of headline numbers for the counters.\n",
+        "SELECT\n",
+        "  round(avg(CASE WHEN days_ahead = 1 THEN abs(estimate - actual) END), 1)       AS day1_error,\n",
+        "  round(avg(CASE WHEN days_ahead = 1 THEN abs(last_7d_price - actual) END), 1)  AS day1_naive_error,\n",
+        "  round(1 - avg(CASE WHEN days_ahead = 1 THEN abs(estimate - actual) END)\n",
+        "          / avg(CASE WHEN days_ahead = 1 THEN abs(last_7d_price - actual) END), 3)\n",
+        "                                                                                AS day1_improvement,\n",
+        "  round(avg(CASE WHEN days_ahead = 7 THEN abs(estimate - actual) END), 1)       AS day7_error,\n",
+        "  count(DISTINCT issue_date)                                                    AS issues_scored\n",
+        "FROM scored"
+      ]
+    },
+    {
+      "name": "backtest_by_horizon",
+      "displayName": "Backtest error by days ahead",
+      "queryLines": [
+        "-- Backtest of the week-ahead GB power price report: how far off it was, by days ahead.\n",
+        "--\n",
+        "-- Replays sql/week_ahead_report.sql for every past issue in fact_gb_week_ahead_outlook\n",
+        "-- (rebuilt from Open-Meteo's archive back to Mar 2024, then the live daily fetches): the\n",
+        "-- same model refitted on the 60 complete days before each issue, applied to that issue's\n",
+        "-- forecasts, blended 75/25 with the last 7 days' average price, and compared with the day's\n",
+        "-- market index price once it is known.\n",
+        "-- Replace `energy` with your catalog.\n",
+        "--\n",
+        "-- Columns, per days_ahead (1 = tomorrow):\n",
+        "--   mae_report            the report's estimate (model blended with the last 7 days)\n",
+        "--   mae_model_only        the model alone, without the blend\n",
+        "--   mae_last_7_days       \"same as the last 7 days\" (the baseline to beat)\n",
+        "--   mae_actual_residual   the model alone fed the residual demand that actually happened:\n",
+        "--                         the gap to mae_model_only is what forecasting demand and wind costs\n",
+        "--   bias_report           mean of estimate minus actual (positive = too high)\n",
+        "--   mae_residual_gw       how far off the residual demand forecast was\n",
+        "--   share_late_hours      share of days using a weather forecast made after the issue time\n",
+        "--                         (archived issues only, late on day 7: the archive keeps 7 days\n",
+        "--                         of lead), so day 7 is slightly flattered\n",
+        "\n",
+        "WITH params AS (\n",
+        "  SELECT 0.25 AS last_7_days_weight                  -- as in sql/week_ahead_report.sql\n",
+        "),\n",
+        "\n",
+        "history AS (\n",
+        "  SELECT\n",
+        "    m.date,\n",
+        "    m.gb_market_index_price_gbp_mwh                       AS y,\n",
+        "    m.gb_avg_residual_demand_mw / 1000                    AS x1,   -- GW\n",
+        "    lag(m.gb_gas_sap_gbp_mwh) OVER (ORDER BY m.date)      AS x2    -- previous gas day\n",
+        "  FROM fact_market_daily m\n",
+        "  WHERE m.is_complete_day\n",
+        "),\n",
+        "\n",
+        "issues AS (\n",
+        "  SELECT DISTINCT issue_date FROM fact_gb_week_ahead_outlook\n",
+        "),\n",
+        "\n",
+        "-- Two-regressor least squares per issue, from covariances (as in the report).\n",
+        "moments AS (\n",
+        "  SELECT\n",
+        "    i.issue_date,\n",
+        "    count(*) AS n,\n",
+        "    avg(h.y) AS my, avg(h.x1) AS m1, avg(h.x2) AS m2,\n",
+        "    var_pop(h.x1) AS v1, var_pop(h.x2) AS v2,\n",
+        "    covar_pop(h.x1, h.x2) AS c12, covar_pop(h.x1, h.y) AS c1y, covar_pop(h.x2, h.y) AS c2y\n",
+        "  FROM issues i\n",
+        "  JOIN history h\n",
+        "    ON h.date < i.issue_date AND h.date >= date_sub(i.issue_date, 60)\n",
+        "  WHERE h.y IS NOT NULL AND h.x1 IS NOT NULL AND h.x2 IS NOT NULL\n",
+        "  GROUP BY i.issue_date\n",
+        "),\n",
+        "\n",
+        "coefs AS (\n",
+        "  SELECT\n",
+        "    issue_date, n, b1, b2, my - b1 * m1 - b2 * m2 AS a\n",
+        "  FROM (\n",
+        "    SELECT\n",
+        "      issue_date, n, my, m1, m2,\n",
+        "      (c1y * v2 - c2y * c12) / (v1 * v2 - c12 * c12) AS b1,\n",
+        "      (c2y * v1 - c1y * c12) / (v1 * v2 - c12 * c12) AS b2\n",
+        "    FROM moments\n",
+        "  )\n",
+        "  WHERE n >= 30                                     -- skip issues with a thin fit window\n",
+        "),\n",
+        "\n",
+        "recent AS (\n",
+        "  SELECT i.issue_date, avg(m.gb_market_index_price_gbp_mwh) AS last_7d_price\n",
+        "  FROM issues i\n",
+        "  JOIN fact_market_daily m\n",
+        "    ON m.date >= date_sub(i.issue_date, 7) AND m.date < i.issue_date\n",
+        "  GROUP BY i.issue_date\n",
+        "),\n",
+        "\n",
+        "scored AS (\n",
+        "  SELECT\n",
+        "    o.issue_date,\n",
+        "    o.days_ahead,\n",
+        "    o.is_archived_forecast,\n",
+        "    o.forecast_lead_shortfall_hours,\n",
+        "    a.gb_market_index_price_gbp_mwh                                        AS actual,\n",
+        "    c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh\n",
+        "                                                                            AS model_estimate,\n",
+        "    (1 - p.last_7_days_weight)\n",
+        "      * (c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh)\n",
+        "      + p.last_7_days_weight * r.last_7d_price                              AS estimate,\n",
+        "    c.a + c.b1 * a.gb_avg_residual_demand_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh\n",
+        "                                                                            AS estimate_actual_residual,\n",
+        "    r.last_7d_price,\n",
+        "    (o.residual_demand_forecast_mw - a.gb_avg_residual_demand_mw) / 1000   AS residual_error_gw\n",
+        "  FROM fact_gb_week_ahead_outlook o\n",
+        "  JOIN coefs c ON c.issue_date = o.issue_date\n",
+        "  JOIN recent r ON r.issue_date = o.issue_date\n",
+        "  CROSS JOIN params p\n",
+        "  JOIN fact_market_daily a\n",
+        "    ON a.date = o.target_date AND a.is_complete_day\n",
+        "  WHERE a.gb_market_index_price_gbp_mwh IS NOT NULL\n",
+        "    AND o.residual_demand_forecast_mw IS NOT NULL\n",
+        "    AND o.latest_sap_gbp_mwh IS NOT NULL\n",
+        ")\n",
+        "\n",
+        "-- needs: backtest\n",
+        "-- Average error by days ahead over every past forecast: the model against the naive\n",
+        "-- \"same as the last 7 days\".\n",
+        "SELECT\n",
+        "  days_ahead,\n",
+        "  round(avg(abs(estimate - actual)), 1)        AS model_error,\n",
+        "  round(avg(abs(last_7d_price - actual)), 1)   AS last_7_days_error,\n",
+        "  count(*)                                     AS forecasts\n",
+        "FROM scored\n",
+        "GROUP BY days_ahead\n",
+        "ORDER BY days_ahead"
+      ]
+    },
+    {
+      "name": "backtest_monthly",
+      "displayName": "Backtest day-ahead error by month",
+      "queryLines": [
+        "-- Backtest of the week-ahead GB power price report: how far off it was, by days ahead.\n",
+        "--\n",
+        "-- Replays sql/week_ahead_report.sql for every past issue in fact_gb_week_ahead_outlook\n",
+        "-- (rebuilt from Open-Meteo's archive back to Mar 2024, then the live daily fetches): the\n",
+        "-- same model refitted on the 60 complete days before each issue, applied to that issue's\n",
+        "-- forecasts, blended 75/25 with the last 7 days' average price, and compared with the day's\n",
+        "-- market index price once it is known.\n",
+        "-- Replace `energy` with your catalog.\n",
+        "--\n",
+        "-- Columns, per days_ahead (1 = tomorrow):\n",
+        "--   mae_report            the report's estimate (model blended with the last 7 days)\n",
+        "--   mae_model_only        the model alone, without the blend\n",
+        "--   mae_last_7_days       \"same as the last 7 days\" (the baseline to beat)\n",
+        "--   mae_actual_residual   the model alone fed the residual demand that actually happened:\n",
+        "--                         the gap to mae_model_only is what forecasting demand and wind costs\n",
+        "--   bias_report           mean of estimate minus actual (positive = too high)\n",
+        "--   mae_residual_gw       how far off the residual demand forecast was\n",
+        "--   share_late_hours      share of days using a weather forecast made after the issue time\n",
+        "--                         (archived issues only, late on day 7: the archive keeps 7 days\n",
+        "--                         of lead), so day 7 is slightly flattered\n",
+        "\n",
+        "WITH params AS (\n",
+        "  SELECT 0.25 AS last_7_days_weight                  -- as in sql/week_ahead_report.sql\n",
+        "),\n",
+        "\n",
+        "history AS (\n",
+        "  SELECT\n",
+        "    m.date,\n",
+        "    m.gb_market_index_price_gbp_mwh                       AS y,\n",
+        "    m.gb_avg_residual_demand_mw / 1000                    AS x1,   -- GW\n",
+        "    lag(m.gb_gas_sap_gbp_mwh) OVER (ORDER BY m.date)      AS x2    -- previous gas day\n",
+        "  FROM fact_market_daily m\n",
+        "  WHERE m.is_complete_day\n",
+        "),\n",
+        "\n",
+        "issues AS (\n",
+        "  SELECT DISTINCT issue_date FROM fact_gb_week_ahead_outlook\n",
+        "),\n",
+        "\n",
+        "-- Two-regressor least squares per issue, from covariances (as in the report).\n",
+        "moments AS (\n",
+        "  SELECT\n",
+        "    i.issue_date,\n",
+        "    count(*) AS n,\n",
+        "    avg(h.y) AS my, avg(h.x1) AS m1, avg(h.x2) AS m2,\n",
+        "    var_pop(h.x1) AS v1, var_pop(h.x2) AS v2,\n",
+        "    covar_pop(h.x1, h.x2) AS c12, covar_pop(h.x1, h.y) AS c1y, covar_pop(h.x2, h.y) AS c2y\n",
+        "  FROM issues i\n",
+        "  JOIN history h\n",
+        "    ON h.date < i.issue_date AND h.date >= date_sub(i.issue_date, 60)\n",
+        "  WHERE h.y IS NOT NULL AND h.x1 IS NOT NULL AND h.x2 IS NOT NULL\n",
+        "  GROUP BY i.issue_date\n",
+        "),\n",
+        "\n",
+        "coefs AS (\n",
+        "  SELECT\n",
+        "    issue_date, n, b1, b2, my - b1 * m1 - b2 * m2 AS a\n",
+        "  FROM (\n",
+        "    SELECT\n",
+        "      issue_date, n, my, m1, m2,\n",
+        "      (c1y * v2 - c2y * c12) / (v1 * v2 - c12 * c12) AS b1,\n",
+        "      (c2y * v1 - c1y * c12) / (v1 * v2 - c12 * c12) AS b2\n",
+        "    FROM moments\n",
+        "  )\n",
+        "  WHERE n >= 30                                     -- skip issues with a thin fit window\n",
+        "),\n",
+        "\n",
+        "recent AS (\n",
+        "  SELECT i.issue_date, avg(m.gb_market_index_price_gbp_mwh) AS last_7d_price\n",
+        "  FROM issues i\n",
+        "  JOIN fact_market_daily m\n",
+        "    ON m.date >= date_sub(i.issue_date, 7) AND m.date < i.issue_date\n",
+        "  GROUP BY i.issue_date\n",
+        "),\n",
+        "\n",
+        "scored AS (\n",
+        "  SELECT\n",
+        "    o.issue_date,\n",
+        "    o.days_ahead,\n",
+        "    o.is_archived_forecast,\n",
+        "    o.forecast_lead_shortfall_hours,\n",
+        "    a.gb_market_index_price_gbp_mwh                                        AS actual,\n",
+        "    c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh\n",
+        "                                                                            AS model_estimate,\n",
+        "    (1 - p.last_7_days_weight)\n",
+        "      * (c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh)\n",
+        "      + p.last_7_days_weight * r.last_7d_price                              AS estimate,\n",
+        "    c.a + c.b1 * a.gb_avg_residual_demand_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh\n",
+        "                                                                            AS estimate_actual_residual,\n",
+        "    r.last_7d_price,\n",
+        "    (o.residual_demand_forecast_mw - a.gb_avg_residual_demand_mw) / 1000   AS residual_error_gw\n",
+        "  FROM fact_gb_week_ahead_outlook o\n",
+        "  JOIN coefs c ON c.issue_date = o.issue_date\n",
+        "  JOIN recent r ON r.issue_date = o.issue_date\n",
+        "  CROSS JOIN params p\n",
+        "  JOIN fact_market_daily a\n",
+        "    ON a.date = o.target_date AND a.is_complete_day\n",
+        "  WHERE a.gb_market_index_price_gbp_mwh IS NOT NULL\n",
+        "    AND o.residual_demand_forecast_mw IS NOT NULL\n",
+        "    AND o.latest_sap_gbp_mwh IS NOT NULL\n",
+        ")\n",
+        "\n",
+        "-- needs: backtest\n",
+        "-- Day-ahead error by month of the forecast day, against the naive benchmark and the\n",
+        "-- price level.\n",
+        "SELECT\n",
+        "  date_trunc('MONTH', date_add(issue_date, days_ahead))   AS month,\n",
+        "  round(avg(abs(estimate - actual)), 1)                    AS model_error,\n",
+        "  round(avg(abs(last_7d_price - actual)), 1)               AS last_7_days_error,\n",
+        "  round(avg(actual), 0)                                    AS avg_price\n",
+        "FROM scored\n",
+        "WHERE days_ahead = 1\n",
+        "GROUP BY 1\n",
+        "ORDER BY 1"
+      ]
+    },
+    {
+      "name": "backtest_recent",
+      "displayName": "Day-ahead estimate against actual, last 120 days",
+      "queryLines": [
+        "-- Backtest of the week-ahead GB power price report: how far off it was, by days ahead.\n",
+        "--\n",
+        "-- Replays sql/week_ahead_report.sql for every past issue in fact_gb_week_ahead_outlook\n",
+        "-- (rebuilt from Open-Meteo's archive back to Mar 2024, then the live daily fetches): the\n",
+        "-- same model refitted on the 60 complete days before each issue, applied to that issue's\n",
+        "-- forecasts, blended 75/25 with the last 7 days' average price, and compared with the day's\n",
+        "-- market index price once it is known.\n",
+        "-- Replace `energy` with your catalog.\n",
+        "--\n",
+        "-- Columns, per days_ahead (1 = tomorrow):\n",
+        "--   mae_report            the report's estimate (model blended with the last 7 days)\n",
+        "--   mae_model_only        the model alone, without the blend\n",
+        "--   mae_last_7_days       \"same as the last 7 days\" (the baseline to beat)\n",
+        "--   mae_actual_residual   the model alone fed the residual demand that actually happened:\n",
+        "--                         the gap to mae_model_only is what forecasting demand and wind costs\n",
+        "--   bias_report           mean of estimate minus actual (positive = too high)\n",
+        "--   mae_residual_gw       how far off the residual demand forecast was\n",
+        "--   share_late_hours      share of days using a weather forecast made after the issue time\n",
+        "--                         (archived issues only, late on day 7: the archive keeps 7 days\n",
+        "--                         of lead), so day 7 is slightly flattered\n",
+        "\n",
+        "WITH params AS (\n",
+        "  SELECT 0.25 AS last_7_days_weight                  -- as in sql/week_ahead_report.sql\n",
+        "),\n",
+        "\n",
+        "history AS (\n",
+        "  SELECT\n",
+        "    m.date,\n",
+        "    m.gb_market_index_price_gbp_mwh                       AS y,\n",
+        "    m.gb_avg_residual_demand_mw / 1000                    AS x1,   -- GW\n",
+        "    lag(m.gb_gas_sap_gbp_mwh) OVER (ORDER BY m.date)      AS x2    -- previous gas day\n",
+        "  FROM fact_market_daily m\n",
+        "  WHERE m.is_complete_day\n",
+        "),\n",
+        "\n",
+        "issues AS (\n",
+        "  SELECT DISTINCT issue_date FROM fact_gb_week_ahead_outlook\n",
+        "),\n",
+        "\n",
+        "-- Two-regressor least squares per issue, from covariances (as in the report).\n",
+        "moments AS (\n",
+        "  SELECT\n",
+        "    i.issue_date,\n",
+        "    count(*) AS n,\n",
+        "    avg(h.y) AS my, avg(h.x1) AS m1, avg(h.x2) AS m2,\n",
+        "    var_pop(h.x1) AS v1, var_pop(h.x2) AS v2,\n",
+        "    covar_pop(h.x1, h.x2) AS c12, covar_pop(h.x1, h.y) AS c1y, covar_pop(h.x2, h.y) AS c2y\n",
+        "  FROM issues i\n",
+        "  JOIN history h\n",
+        "    ON h.date < i.issue_date AND h.date >= date_sub(i.issue_date, 60)\n",
+        "  WHERE h.y IS NOT NULL AND h.x1 IS NOT NULL AND h.x2 IS NOT NULL\n",
+        "  GROUP BY i.issue_date\n",
+        "),\n",
+        "\n",
+        "coefs AS (\n",
+        "  SELECT\n",
+        "    issue_date, n, b1, b2, my - b1 * m1 - b2 * m2 AS a\n",
+        "  FROM (\n",
+        "    SELECT\n",
+        "      issue_date, n, my, m1, m2,\n",
+        "      (c1y * v2 - c2y * c12) / (v1 * v2 - c12 * c12) AS b1,\n",
+        "      (c2y * v1 - c1y * c12) / (v1 * v2 - c12 * c12) AS b2\n",
+        "    FROM moments\n",
+        "  )\n",
+        "  WHERE n >= 30                                     -- skip issues with a thin fit window\n",
+        "),\n",
+        "\n",
+        "recent AS (\n",
+        "  SELECT i.issue_date, avg(m.gb_market_index_price_gbp_mwh) AS last_7d_price\n",
+        "  FROM issues i\n",
+        "  JOIN fact_market_daily m\n",
+        "    ON m.date >= date_sub(i.issue_date, 7) AND m.date < i.issue_date\n",
+        "  GROUP BY i.issue_date\n",
+        "),\n",
+        "\n",
+        "scored AS (\n",
+        "  SELECT\n",
+        "    o.issue_date,\n",
+        "    o.days_ahead,\n",
+        "    o.is_archived_forecast,\n",
+        "    o.forecast_lead_shortfall_hours,\n",
+        "    a.gb_market_index_price_gbp_mwh                                        AS actual,\n",
+        "    c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh\n",
+        "                                                                            AS model_estimate,\n",
+        "    (1 - p.last_7_days_weight)\n",
+        "      * (c.a + c.b1 * o.residual_demand_forecast_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh)\n",
+        "      + p.last_7_days_weight * r.last_7d_price                              AS estimate,\n",
+        "    c.a + c.b1 * a.gb_avg_residual_demand_mw / 1000 + c.b2 * o.latest_sap_gbp_mwh\n",
+        "                                                                            AS estimate_actual_residual,\n",
+        "    r.last_7d_price,\n",
+        "    (o.residual_demand_forecast_mw - a.gb_avg_residual_demand_mw) / 1000   AS residual_error_gw\n",
+        "  FROM fact_gb_week_ahead_outlook o\n",
+        "  JOIN coefs c ON c.issue_date = o.issue_date\n",
+        "  JOIN recent r ON r.issue_date = o.issue_date\n",
+        "  CROSS JOIN params p\n",
+        "  JOIN fact_market_daily a\n",
+        "    ON a.date = o.target_date AND a.is_complete_day\n",
+        "  WHERE a.gb_market_index_price_gbp_mwh IS NOT NULL\n",
+        "    AND o.residual_demand_forecast_mw IS NOT NULL\n",
+        "    AND o.latest_sap_gbp_mwh IS NOT NULL\n",
+        ")\n",
+        "\n",
+        "-- needs: backtest\n",
+        "-- The day-ahead estimate against what happened, for the last 120 days.\n",
+        "SELECT\n",
+        "  date_add(issue_date, days_ahead)   AS day,\n",
+        "  round(actual, 1)                   AS actual_price,\n",
+        "  round(estimate, 1)                 AS day_ahead_estimate\n",
+        "FROM scored\n",
+        "WHERE days_ahead = 1\n",
+        "  AND date_add(issue_date, days_ahead) >= date_sub(current_date(), 120)\n",
+        "ORDER BY day"
+      ]
+    },
+    {
+      "name": "market_kpis",
+      "displayName": "Market headline numbers",
+      "queryLines": [
+        "-- One row of headline numbers for the counters.\n",
+        "WITH days AS (\n",
+        "  SELECT date, gb_market_index_price_gbp_mwh AS price, avg_wind_share\n",
+        "  FROM fact_market_daily\n",
+        "  WHERE is_complete_day AND gb_market_index_price_gbp_mwh IS NOT NULL\n",
+        ")\n",
+        "SELECT\n",
+        "  max(date)                                                                     AS latest_day,\n",
+        "  round(max_by(price, date), 0)                                                 AS latest_price,\n",
+        "  round(avg(CASE WHEN date > date_sub(current_date(), 31) THEN price END), 0)   AS avg_price_30d,\n",
+        "  round(avg(CASE WHEN date > date_sub(current_date(), 396)\n",
+        "                  AND date <= date_sub(current_date(), 365) THEN price END), 0) AS avg_price_30d_last_year,\n",
+        "  round(avg(CASE WHEN date > date_sub(current_date(), 31) THEN avg_wind_share END), 3)\n",
+        "                                                                                AS wind_share_30d\n",
+        "FROM days"
+      ]
+    },
+    {
+      "name": "market_daily",
+      "displayName": "Daily price and drivers, last two years",
+      "queryLines": [
+        "-- Complete days over the last two years: price and its two main drivers.\n",
+        "SELECT\n",
+        "  date,\n",
+        "  CAST(year(date) AS STRING)                    AS year,\n",
+        "  round(gb_market_index_price_gbp_mwh, 1)       AS price,\n",
+        "  round(gb_avg_residual_demand_mw / 1000, 2)    AS residual_demand_gw,\n",
+        "  round(avg_wind_share * 100, 1)                AS wind_share_pct,\n",
+        "  round(gb_gas_sap_gbp_mwh, 1)                  AS gas_sap,\n",
+        "  round(ttf_gbp_mwh, 1)                         AS gas_ttf\n",
+        "FROM fact_market_daily\n",
+        "WHERE is_complete_day\n",
+        "  AND date >= add_months(current_date(), -24)\n",
+        "ORDER BY date"
+      ]
+    },
+    {
+      "name": "neighbours",
+      "displayName": "GB and neighbouring markets, last 180 days",
+      "queryLines": [
+        "-- GB against its interconnected neighbours, last 180 days, one row per market and day.\n",
+        "SELECT date, market, round(price, 1) AS price\n",
+        "FROM fact_market_daily\n",
+        "LATERAL VIEW stack(4,\n",
+        "  'GB',           gb_market_index_price_gbp_mwh,\n",
+        "  'France',       fr_avg_price_gbp_mwh,\n",
+        "  'Netherlands',  nl_avg_price_gbp_mwh,\n",
+        "  'Norway (NO2)', no2_avg_price_gbp_mwh) AS market, price\n",
+        "WHERE date >= date_sub(current_date(), 180)\n",
+        "  AND is_complete_day\n",
+        "  AND price IS NOT NULL\n",
+        "ORDER BY date, market"
+      ]
+    },
+    {
+      "name": "platform_kpis",
+      "displayName": "Platform headline numbers",
+      "queryLines": [
+        "-- One row of headline numbers for the counters.\n",
+        "WITH jobs AS (\n",
+        "  SELECT job_id, name\n",
+        "  FROM system.lakeflow.jobs\n",
+        "  QUALIFY row_number() OVER (PARTITION BY job_id ORDER BY change_time DESC) = 1\n",
+        "),\n",
+        "daily AS (\n",
+        "  SELECT r.result_state\n",
+        "  FROM system.lakeflow.job_run_timeline r\n",
+        "  JOIN jobs j ON j.job_id = r.job_id\n",
+        "  WHERE j.name = 'energy-daily'\n",
+        "    AND r.result_state IS NOT NULL\n",
+        "    AND r.period_start_time >= date_sub(current_date(), 30)\n",
+        ")\n",
+        "SELECT\n",
+        "  (SELECT count(*) FROM daily WHERE result_state = 'SUCCEEDED')   AS daily_runs_ok,\n",
+        "  (SELECT count(*) FROM daily)                                    AS daily_runs,\n",
+        "  (SELECT count(*) FROM dq_settlement_period_completeness\n",
+        "    WHERE date >= date_sub(current_date(), 30)\n",
+        "      AND date < (SELECT max(settlement_date) FROM fact_gb_half_hourly))\n",
+        "                                                                  AS incomplete_days_30d"
+      ]
+    },
+    {
+      "name": "freshness",
+      "displayName": "Latest data per source",
+      "queryLines": [
+        "-- Latest day loaded per source, against how far behind each is allowed to be.\n",
+        "WITH latest AS (\n",
+        "  SELECT 'Elexon: GB prices' AS source, max(settlement_date) AS latest_day, 1 AS allowed_days_behind\n",
+        "  FROM fact_gb_half_hourly WHERE market_index_price_gbp_mwh IS NOT NULL\n",
+        "  UNION ALL\n",
+        "  SELECT 'Elexon: demand forecast', max(to_date(demand_forecast_published_utc)), 1\n",
+        "  FROM fact_gb_week_ahead_outlook\n",
+        "  UNION ALL\n",
+        "  SELECT 'Open-Meteo: weather forecast', max(to_date(issued_utc)), 1\n",
+        "  FROM fact_gb_week_ahead_outlook WHERE NOT is_archived_forecast\n",
+        "  UNION ALL\n",
+        "  SELECT 'ENTSO-E: EU day-ahead prices', max(to_date(hour_utc)), 1\n",
+        "  FROM fact_eu_day_ahead_hourly\n",
+        "  UNION ALL\n",
+        "  SELECT 'National Gas: SAP', max(date), 2\n",
+        "  FROM fact_market_daily WHERE gb_gas_sap_gbp_mwh IS NOT NULL\n",
+        "  UNION ALL\n",
+        "  SELECT 'yfinance: TTF gas', max(date), 4\n",
+        "  FROM fact_market_daily WHERE ttf_eur_mwh IS NOT NULL\n",
+        "  UNION ALL\n",
+        "  SELECT 'FRED: FX rates', max(date), 10\n",
+        "  FROM fact_market_daily WHERE usd_per_gbp IS NOT NULL\n",
+        "  UNION ALL\n",
+        "  SELECT 'yfinance: share prices', max(trade_date), 4\n",
+        "  FROM fact_stock_returns_daily\n",
+        "  UNION ALL\n",
+        "  SELECT 'Copernicus: ERA5 weather', max(to_date(valid_time_utc)), 14\n",
+        "  FROM gb_weather_hourly\n",
+        ")\n",
+        "SELECT\n",
+        "  source,\n",
+        "  latest_day,\n",
+        "  datediff(current_date(), latest_day)   AS days_behind,\n",
+        "  allowed_days_behind,\n",
+        "  CASE WHEN latest_day IS NULL THEN 'No data'\n",
+        "       WHEN datediff(current_date(), latest_day) <= allowed_days_behind THEN 'OK'\n",
+        "       ELSE 'Late' END                   AS status\n",
+        "FROM latest\n",
+        "ORDER BY source"
+      ]
+    },
+    {
+      "name": "incomplete_days",
+      "displayName": "Incomplete settlement days, last 30",
+      "queryLines": [
+        "-- Settlement days in the last 30 with fewer half-hours loaded than the day has\n",
+        "-- (46, 48 or 50), before the latest day loaded (which is still filling, as is yesterday\n",
+        "-- until the morning run). Empty when everything is complete. Same rule as energy_checks.\n",
+        "SELECT date, expected_settlement_periods, periods_loaded\n",
+        "FROM dq_settlement_period_completeness\n",
+        "WHERE date >= date_sub(current_date(), 30)\n",
+        "  AND date < (SELECT max(settlement_date) FROM fact_gb_half_hourly)\n",
+        "ORDER BY date"
+      ]
+    },
+    {
+      "name": "job_runs",
+      "displayName": "Prod job runs, last 30 days",
+      "queryLines": [
+        "-- Finished runs of the prod jobs over the last 30 days, by day and outcome.\n",
+        "WITH jobs AS (\n",
+        "  SELECT job_id, name\n",
+        "  FROM system.lakeflow.jobs\n",
+        "  QUALIFY row_number() OVER (PARTITION BY job_id ORDER BY change_time DESC) = 1\n",
+        ")\n",
+        "SELECT\n",
+        "  to_date(r.period_start_time)   AS run_date,\n",
+        "  j.name                         AS job,\n",
+        "  r.result_state,\n",
+        "  count(*)                       AS runs\n",
+        "FROM system.lakeflow.job_run_timeline r\n",
+        "JOIN jobs j ON j.job_id = r.job_id\n",
+        "WHERE j.name IN ('energy-daily', 'energy-checks', 'energy-weekly-weather', 'energy-backfill')\n",
+        "  AND r.result_state IS NOT NULL\n",
+        "  AND r.period_start_time >= date_sub(current_date(), 30)\n",
+        "GROUP BY ALL\n",
+        "ORDER BY run_date, job"
+      ]
+    },
+    {
+      "name": "cost_daily",
+      "displayName": "Project cost per day, last 30 days",
+      "queryLines": [
+        "-- Databricks list-price cost of this project per day, product and environment, last 30\n",
+        "-- days. Jobs and the warehouse carry the project tag; the pipeline is matched by name.\n",
+        "-- The environment comes from the job or pipeline name: \"[ci] \" for the CI copy, \"[dev \"\n",
+        "-- for a developer's copy, no prefix for prod. The warehouse is shared by all of them.\n",
+        "-- Excludes Azure storage, and predictive optimization, which isn't attributed to a project.\n",
+        "WITH jobs AS (\n",
+        "  SELECT job_id, name\n",
+        "  FROM system.lakeflow.jobs\n",
+        "  QUALIFY row_number() OVER (PARTITION BY job_id ORDER BY change_time DESC) = 1\n",
+        "),\n",
+        "pipelines AS (\n",
+        "  SELECT pipeline_id, name\n",
+        "  FROM system.lakeflow.pipelines\n",
+        "  WHERE name LIKE '%energy-medallion'\n",
+        "  QUALIFY row_number() OVER (PARTITION BY pipeline_id ORDER BY change_time DESC) = 1\n",
+        ")\n",
+        "SELECT\n",
+        "  u.usage_date,\n",
+        "  CASE u.billing_origin_product\n",
+        "    WHEN 'DLT'  THEN 'Pipeline'\n",
+        "    WHEN 'JOBS' THEN 'Jobs'\n",
+        "    WHEN 'SQL'  THEN 'SQL warehouse'\n",
+        "    ELSE initcap(u.billing_origin_product) END                 AS product,\n",
+        "  CASE\n",
+        "    WHEN u.billing_origin_product = 'SQL'                THEN 'Shared (warehouse)'\n",
+        "    WHEN coalesce(pl.name, j.name) LIKE '[ci] %'         THEN 'CI'\n",
+        "    WHEN coalesce(pl.name, j.name) LIKE '[dev %'         THEN 'Dev'\n",
+        "    WHEN coalesce(pl.name, j.name) IS NULL               THEN 'Unknown'\n",
+        "    ELSE 'Prod' END                                            AS environment,\n",
+        "  round(sum(u.usage_quantity * p.pricing.default), 2)          AS usd\n",
+        "FROM system.billing.usage u\n",
+        "JOIN system.billing.list_prices p\n",
+        "  ON u.sku_name = p.sku_name\n",
+        " AND u.usage_start_time >= p.price_start_time\n",
+        " AND (p.price_end_time IS NULL OR u.usage_start_time < p.price_end_time)\n",
+        "LEFT JOIN pipelines pl ON pl.pipeline_id = u.usage_metadata.dlt_pipeline_id\n",
+        "LEFT JOIN jobs j ON j.job_id = u.usage_metadata.job_id\n",
+        "WHERE u.usage_date >= date_sub(current_date(), 30)\n",
+        "  AND (u.custom_tags['project'] = 'energy-markets-lakehouse' OR pl.pipeline_id IS NOT NULL)\n",
+        "GROUP BY ALL\n",
+        "ORDER BY u.usage_date, product, environment"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "outlook",
+      "displayName": "Week-ahead outlook",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "outlook_intro",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Week-ahead GB power price outlook",
+                "Each morning: an estimated daily average price (GBP/MWh) for each of the next 7 days, with a range that held about 72% of outcomes in the backtest. Below it, every past forecast since March 2024, rebuilt from what was known at the time and scored against what happened."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_day1",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "backtest_kpis",
+                  "fields": [
+                    {
+                      "name": "day1_error",
+                      "expression": "`day1_error`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "day1_error",
+                  "displayName": "Day-ahead error, GBP/MWh",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Day-ahead error, GBP/MWh",
+                "showDescription": true,
+                "description": "Mean absolute error over every past forecast"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_improve",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "backtest_kpis",
+                  "fields": [
+                    {
+                      "name": "day1_improvement",
+                      "expression": "`day1_improvement`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "day1_improvement",
+                  "displayName": "Better than the naive forecast",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Better than the naive forecast",
+                "showDescription": true,
+                "description": "Against 'same as the last 7 days', day ahead"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_issues",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "backtest_kpis",
+                  "fields": [
+                    {
+                      "name": "issues_scored",
+                      "expression": "`issues_scored`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "issues_scored",
+                  "displayName": "Past forecasts scored"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Past forecasts scored",
+                "showDescription": true,
+                "description": "Each one a 7-day outlook"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "outlook_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "outlook",
+                  "fields": [
+                    {
+                      "name": "day",
+                      "expression": "`day`"
+                    },
+                    {
+                      "name": "price_estimate_gbp_mwh",
+                      "expression": "`price_estimate_gbp_mwh`"
+                    },
+                    {
+                      "name": "price_low_gbp_mwh",
+                      "expression": "`price_low_gbp_mwh`"
+                    },
+                    {
+                      "name": "price_high_gbp_mwh",
+                      "expression": "`price_high_gbp_mwh`"
+                    },
+                    {
+                      "name": "last_7_days_avg_price_gbp_mwh",
+                      "expression": "`last_7_days_avg_price_gbp_mwh`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "day",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Day"
+                },
+                "y": {
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "GBP/MWh"
+                  },
+                  "fields": [
+                    {
+                      "fieldName": "price_estimate_gbp_mwh",
+                      "displayName": "Estimate"
+                    },
+                    {
+                      "fieldName": "price_low_gbp_mwh",
+                      "displayName": "Low"
+                    },
+                    {
+                      "fieldName": "price_high_gbp_mwh",
+                      "displayName": "High"
+                    },
+                    {
+                      "fieldName": "last_7_days_avg_price_gbp_mwh",
+                      "displayName": "Last 7 days' average"
+                    }
+                  ]
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "This week's outlook"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "outlook_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "outlook",
+                  "fields": [
+                    {
+                      "name": "day",
+                      "expression": "`day`"
+                    },
+                    {
+                      "name": "weekday",
+                      "expression": "`weekday`"
+                    },
+                    {
+                      "name": "price_estimate_gbp_mwh",
+                      "expression": "`price_estimate_gbp_mwh`"
+                    },
+                    {
+                      "name": "price_low_gbp_mwh",
+                      "expression": "`price_low_gbp_mwh`"
+                    },
+                    {
+                      "name": "price_high_gbp_mwh",
+                      "expression": "`price_high_gbp_mwh`"
+                    },
+                    {
+                      "name": "residual_demand_gw",
+                      "expression": "`residual_demand_gw`"
+                    },
+                    {
+                      "name": "wind_gw",
+                      "expression": "`wind_gw`"
+                    },
+                    {
+                      "name": "gas_sap_gbp_mwh",
+                      "expression": "`gas_sap_gbp_mwh`"
+                    },
+                    {
+                      "name": "wind_source",
+                      "expression": "`wind_source`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "day",
+                    "title": "Day",
+                    "displayName": "Day",
+                    "type": "date",
+                    "displayAs": "date",
+                    "visible": true,
+                    "order": 0,
+                    "alignContent": "left",
+                    "dateTimeFormat": "YYYY-MM-DD"
+                  },
+                  {
+                    "fieldName": "weekday",
+                    "title": "",
+                    "displayName": "",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 1,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "price_estimate_gbp_mwh",
+                    "title": "Estimate",
+                    "displayName": "Estimate",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "alignContent": "right"
+                  },
+                  {
+                    "fieldName": "price_low_gbp_mwh",
+                    "title": "Low",
+                    "displayName": "Low",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "alignContent": "right"
+                  },
+                  {
+                    "fieldName": "price_high_gbp_mwh",
+                    "title": "High",
+                    "displayName": "High",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 4,
+                    "alignContent": "right"
+                  },
+                  {
+                    "fieldName": "residual_demand_gw",
+                    "title": "Residual demand, GW",
+                    "displayName": "Residual demand, GW",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 5,
+                    "alignContent": "right",
+                    "numberFormat": "0.0"
+                  },
+                  {
+                    "fieldName": "wind_gw",
+                    "title": "Wind, GW",
+                    "displayName": "Wind, GW",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 6,
+                    "alignContent": "right",
+                    "numberFormat": "0.0"
+                  },
+                  {
+                    "fieldName": "gas_sap_gbp_mwh",
+                    "title": "Gas SAP",
+                    "displayName": "Gas SAP",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 7,
+                    "alignContent": "right",
+                    "numberFormat": "0.0"
+                  },
+                  {
+                    "fieldName": "wind_source",
+                    "title": "Wind forecast",
+                    "displayName": "Wind forecast",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 8,
+                    "alignContent": "left"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Estimates and what drives them"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 5,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "horizon_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "backtest_by_horizon",
+                  "fields": [
+                    {
+                      "name": "days_ahead",
+                      "expression": "`days_ahead`"
+                    },
+                    {
+                      "name": "model_error",
+                      "expression": "`model_error`"
+                    },
+                    {
+                      "name": "last_7_days_error",
+                      "expression": "`last_7_days_error`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "days_ahead",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Days ahead"
+                },
+                "y": {
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "Mean absolute error, GBP/MWh"
+                  },
+                  "fields": [
+                    {
+                      "fieldName": "model_error",
+                      "displayName": "This model"
+                    },
+                    {
+                      "fieldName": "last_7_days_error",
+                      "displayName": "Same as last 7 days"
+                    }
+                  ]
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Error by days ahead",
+                "showDescription": true,
+                "description": "Every past forecast since March 2024"
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "monthly_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "backtest_monthly",
+                  "fields": [
+                    {
+                      "name": "month",
+                      "expression": "`month`"
+                    },
+                    {
+                      "name": "model_error",
+                      "expression": "`model_error`"
+                    },
+                    {
+                      "name": "last_7_days_error",
+                      "expression": "`last_7_days_error`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "month",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Month"
+                },
+                "y": {
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "Mean absolute error, GBP/MWh"
+                  },
+                  "fields": [
+                    {
+                      "fieldName": "model_error",
+                      "displayName": "This model"
+                    },
+                    {
+                      "fieldName": "last_7_days_error",
+                      "displayName": "Same as last 7 days"
+                    }
+                  ]
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Day-ahead error by month",
+                "showDescription": true,
+                "description": "Errors grow with the price level: see the Market page"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 12,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "recent_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "backtest_recent",
+                  "fields": [
+                    {
+                      "name": "day",
+                      "expression": "`day`"
+                    },
+                    {
+                      "name": "actual_price",
+                      "expression": "`actual_price`"
+                    },
+                    {
+                      "name": "day_ahead_estimate",
+                      "expression": "`day_ahead_estimate`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "day",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Day"
+                },
+                "y": {
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "GBP/MWh"
+                  },
+                  "fields": [
+                    {
+                      "fieldName": "actual_price",
+                      "displayName": "Actual"
+                    },
+                    {
+                      "fieldName": "day_ahead_estimate",
+                      "displayName": "Day-ahead estimate"
+                    }
+                  ]
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Day-ahead estimate against the actual price, last 120 days"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 6,
+            "height": 7
+          }
+        }
+      ]
+    },
+    {
+      "name": "market",
+      "displayName": "Market",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "market_intro",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## The GB power market",
+                "Daily market index price (GBP/MWh). Price follows residual demand (demand left after wind) and gas, the fuel that usually sets the price."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_latest",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "market_kpis",
+                  "fields": [
+                    {
+                      "name": "latest_price",
+                      "expression": "`latest_price`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "latest_price",
+                  "displayName": "Latest complete day, GBP/MWh",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Latest complete day, GBP/MWh"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_30d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "market_kpis",
+                  "fields": [
+                    {
+                      "name": "avg_price_30d",
+                      "expression": "`avg_price_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg_price_30d",
+                  "displayName": "Last 30 days, GBP/MWh",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Last 30 days, GBP/MWh"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_30d_ly",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "market_kpis",
+                  "fields": [
+                    {
+                      "name": "avg_price_30d_last_year",
+                      "expression": "`avg_price_30d_last_year`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg_price_30d_last_year",
+                  "displayName": "Same 30 days last year, GBP/MWh",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Same 30 days last year, GBP/MWh"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "price_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "market_daily",
+                  "fields": [
+                    {
+                      "name": "date",
+                      "expression": "`date`"
+                    },
+                    {
+                      "name": "price",
+                      "expression": "`price`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Date"
+                },
+                "y": {
+                  "fieldName": "price",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "GBP/MWh"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Daily price, last two years"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "scatter_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "market_daily",
+                  "fields": [
+                    {
+                      "name": "residual_demand_gw",
+                      "expression": "`residual_demand_gw`"
+                    },
+                    {
+                      "name": "price",
+                      "expression": "`price`"
+                    },
+                    {
+                      "name": "year",
+                      "expression": "`year`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "scatter",
+              "encodings": {
+                "x": {
+                  "fieldName": "residual_demand_gw",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Residual demand, GW"
+                },
+                "y": {
+                  "fieldName": "price",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "GBP/MWh"
+                },
+                "color": {
+                  "fieldName": "year",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Year"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Price against residual demand, by year",
+                "showDescription": true,
+                "description": "The relationship the forecast relies on, and how it moves"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 11,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "gas_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "market_daily",
+                  "fields": [
+                    {
+                      "name": "date",
+                      "expression": "`date`"
+                    },
+                    {
+                      "name": "gas_sap",
+                      "expression": "`gas_sap`"
+                    },
+                    {
+                      "name": "gas_ttf",
+                      "expression": "`gas_ttf`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Date"
+                },
+                "y": {
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "GBP/MWh"
+                  },
+                  "fields": [
+                    {
+                      "fieldName": "gas_sap",
+                      "displayName": "GB SAP"
+                    },
+                    {
+                      "fieldName": "gas_ttf",
+                      "displayName": "Dutch TTF"
+                    }
+                  ]
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Gas prices"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 11,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "wind_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "market_daily",
+                  "fields": [
+                    {
+                      "name": "date",
+                      "expression": "`date`"
+                    },
+                    {
+                      "name": "wind_share_pct",
+                      "expression": "`wind_share_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Date"
+                },
+                "y": {
+                  "fieldName": "wind_share_pct",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "%"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Wind's share of generation"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "neighbours_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "neighbours",
+                  "fields": [
+                    {
+                      "name": "date",
+                      "expression": "`date`"
+                    },
+                    {
+                      "name": "price",
+                      "expression": "`price`"
+                    },
+                    {
+                      "name": "market",
+                      "expression": "`market`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Date"
+                },
+                "y": {
+                  "fieldName": "price",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "GBP/MWh"
+                },
+                "color": {
+                  "fieldName": "market",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Market"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "GB and its neighbours, last 180 days",
+                "showDescription": true,
+                "description": "Day-ahead prices; GB is the market index price"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 19,
+            "width": 3,
+            "height": 7
+          }
+        }
+      ]
+    },
+    {
+      "name": "platform",
+      "displayName": "Platform health",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "platform_intro",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Platform health",
+                "Is the data fresh and complete, did the prod jobs run, and what does it cost? Job runs and cost come from Databricks system tables."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_runs",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "platform_kpis",
+                  "fields": [
+                    {
+                      "name": "daily_runs_ok",
+                      "expression": "`daily_runs_ok`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "daily_runs_ok",
+                  "displayName": "Successful daily runs, last 30 days"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Successful daily runs, last 30 days"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_incomplete",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "platform_kpis",
+                  "fields": [
+                    {
+                      "name": "incomplete_days_30d",
+                      "expression": "`incomplete_days_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "incomplete_days_30d",
+                  "displayName": "Incomplete settlement days, last 30"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Incomplete settlement days, last 30",
+                "showDescription": true,
+                "description": "Days with fewer half-hours than they should have"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_daily",
+                  "fields": [
+                    {
+                      "name": "sum(usd)",
+                      "expression": "SUM(`usd`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(usd)",
+                  "displayName": "USD",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cost, last 30 days (USD)",
+                "showDescription": true,
+                "description": "Databricks list price; excludes Azure storage"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "freshness_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "freshness",
+                  "fields": [
+                    {
+                      "name": "source",
+                      "expression": "`source`"
+                    },
+                    {
+                      "name": "latest_day",
+                      "expression": "`latest_day`"
+                    },
+                    {
+                      "name": "days_behind",
+                      "expression": "`days_behind`"
+                    },
+                    {
+                      "name": "allowed_days_behind",
+                      "expression": "`allowed_days_behind`"
+                    },
+                    {
+                      "name": "status",
+                      "expression": "`status`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "source",
+                    "title": "Source",
+                    "displayName": "Source",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "latest_day",
+                    "title": "Latest day",
+                    "displayName": "Latest day",
+                    "type": "date",
+                    "displayAs": "date",
+                    "visible": true,
+                    "order": 1,
+                    "alignContent": "left",
+                    "dateTimeFormat": "YYYY-MM-DD"
+                  },
+                  {
+                    "fieldName": "days_behind",
+                    "title": "Days behind",
+                    "displayName": "Days behind",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "alignContent": "right"
+                  },
+                  {
+                    "fieldName": "allowed_days_behind",
+                    "title": "Allowed",
+                    "displayName": "Allowed",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "alignContent": "right"
+                  },
+                  {
+                    "fieldName": "status",
+                    "title": "Status",
+                    "displayName": "Status",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 4,
+                    "alignContent": "left"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Latest data per source",
+                "showDescription": true,
+                "description": "ERA5 is published about 6 days behind and loaded weekly"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "incomplete_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "incomplete_days",
+                  "fields": [
+                    {
+                      "name": "date",
+                      "expression": "`date`"
+                    },
+                    {
+                      "name": "expected_settlement_periods",
+                      "expression": "`expected_settlement_periods`"
+                    },
+                    {
+                      "name": "periods_loaded",
+                      "expression": "`periods_loaded`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "date",
+                    "title": "Day",
+                    "displayName": "Day",
+                    "type": "date",
+                    "displayAs": "date",
+                    "visible": true,
+                    "order": 0,
+                    "alignContent": "left",
+                    "dateTimeFormat": "YYYY-MM-DD"
+                  },
+                  {
+                    "fieldName": "expected_settlement_periods",
+                    "title": "Expected",
+                    "displayName": "Expected",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 1,
+                    "alignContent": "right"
+                  },
+                  {
+                    "fieldName": "periods_loaded",
+                    "title": "Loaded",
+                    "displayName": "Loaded",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "alignContent": "right"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Incomplete settlement days",
+                "showDescription": true,
+                "description": "Empty when every day in the last 30 is complete"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 5,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "cost_env_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_daily",
+                  "fields": [
+                    {
+                      "name": "usage_date",
+                      "expression": "`usage_date`"
+                    },
+                    {
+                      "name": "usd",
+                      "expression": "`usd`"
+                    },
+                    {
+                      "name": "environment",
+                      "expression": "`environment`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "usage_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Day"
+                },
+                "y": {
+                  "fieldName": "usd",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "USD, list price"
+                },
+                "color": {
+                  "fieldName": "environment",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Environment"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cost per day by environment",
+                "showDescription": true,
+                "description": "CI runs on every merge to dev; the warehouse is shared"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "cost_product_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_daily",
+                  "fields": [
+                    {
+                      "name": "usage_date",
+                      "expression": "`usage_date`"
+                    },
+                    {
+                      "name": "usd",
+                      "expression": "`usd`"
+                    },
+                    {
+                      "name": "product",
+                      "expression": "`product`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "usage_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Day"
+                },
+                "y": {
+                  "fieldName": "usd",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "USD, list price"
+                },
+                "color": {
+                  "fieldName": "product",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Product"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cost per day by product",
+                "showDescription": true,
+                "description": "Jobs: ingest and checks code. Pipeline: bronze, silver and gold processing"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 12,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "runs_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "job_runs",
+                  "fields": [
+                    {
+                      "name": "run_date",
+                      "expression": "`run_date`"
+                    },
+                    {
+                      "name": "runs",
+                      "expression": "`runs`"
+                    },
+                    {
+                      "name": "result_state",
+                      "expression": "`result_state`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "run_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Day"
+                },
+                "y": {
+                  "fieldName": "runs",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Runs"
+                },
+                "color": {
+                  "fieldName": "result_state",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Outcome"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Prod job runs by outcome"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 6,
+            "height": 6
+          }
+        }
+      ]
+    }
+  ]
+}

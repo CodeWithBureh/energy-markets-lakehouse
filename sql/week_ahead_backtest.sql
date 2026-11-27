@@ -100,6 +100,7 @@ scored AS (
     AND o.latest_sap_gbp_mwh IS NOT NULL
 )
 
+-- Summary by days ahead. The dashboard reuses everything above this line (dashboards/build.py).
 SELECT
   days_ahead,
   count(*)                                                    AS days_scored,

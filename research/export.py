@@ -45,10 +45,14 @@ class Warehouse:
             raise RuntimeError(p.stderr[-800:])
         return json.loads(p.stdout.lstrip("﻿"))
 
-    def query(self, sql: str) -> pd.DataFrame:
-        r = self._api("post", "/api/2.0/sql/statements",
-                      {"warehouse_id": self.warehouse_id, "statement": sql, "wait_timeout": "50s",
-                       "disposition": "INLINE", "format": "JSON_ARRAY"})
+    def query(self, sql: str, catalog: str | None = None, schema: str | None = None) -> pd.DataFrame:
+        body = {"warehouse_id": self.warehouse_id, "statement": sql, "wait_timeout": "50s",
+                "disposition": "INLINE", "format": "JSON_ARRAY"}
+        if catalog:
+            body["catalog"] = catalog
+        if schema:
+            body["schema"] = schema
+        r = self._api("post", "/api/2.0/sql/statements", body)
         while r["status"]["state"] in ("PENDING", "RUNNING"):
             r = self._api("get", f"/api/2.0/sql/statements/{r['statement_id']}")
         if r["status"]["state"] != "SUCCEEDED":
