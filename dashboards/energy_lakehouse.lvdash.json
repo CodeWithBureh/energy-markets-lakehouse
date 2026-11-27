@@ -732,7 +732,8 @@
         "  (SELECT count(*) FROM daily WHERE result_state = 'SUCCEEDED')   AS daily_runs_ok,\n",
         "  (SELECT count(*) FROM daily)                                    AS daily_runs,\n",
         "  (SELECT count(*) FROM dq_settlement_period_completeness\n",
-        "    WHERE date >= date_sub(current_date(), 30) AND date < current_date())\n",
+        "    WHERE date >= date_sub(current_date(), 30)\n",
+        "      AND date < (SELECT max(settlement_date) FROM fact_gb_half_hourly))\n",
         "                                                                  AS incomplete_days_30d"
       ]
     },
@@ -786,11 +787,12 @@
       "displayName": "Incomplete settlement days, last 30",
       "queryLines": [
         "-- Settlement days in the last 30 with fewer half-hours loaded than the day has\n",
-        "-- (46, 48 or 50). Empty when everything is complete.\n",
+        "-- (46, 48 or 50), before the latest day loaded (which is still filling, as is yesterday\n",
+        "-- until the morning run). Empty when everything is complete. Same rule as energy_checks.\n",
         "SELECT date, expected_settlement_periods, periods_loaded\n",
         "FROM dq_settlement_period_completeness\n",
         "WHERE date >= date_sub(current_date(), 30)\n",
-        "  AND date < current_date()\n",
+        "  AND date < (SELECT max(settlement_date) FROM fact_gb_half_hourly)\n",
         "ORDER BY date"
       ]
     },
