@@ -16,5 +16,6 @@ SELECT
   (SELECT count(*) FROM daily WHERE result_state = 'SUCCEEDED')   AS daily_runs_ok,
   (SELECT count(*) FROM daily)                                    AS daily_runs,
   (SELECT count(*) FROM dq_settlement_period_completeness
-    WHERE date >= date_sub(current_date(), 30) AND date < current_date())
+    WHERE date >= date_sub(current_date(), 30)
+      AND date < (SELECT max(settlement_date) FROM fact_gb_half_hourly))
                                                                   AS incomplete_days_30d
