@@ -44,6 +44,9 @@ variables:
   prod_service_principal:
     description: Application (client) ID of the service principal prod jobs run as
     default: 59f7fbbd-d629-4c33-b2f4-40fb76ed7a47
+  warehouse_id:
+    description: SQL warehouse the dashboard runs on (managed in infra/databricks)
+    default: 8ca00bbc2a6f0a9b
 
 targets:
   dev:
