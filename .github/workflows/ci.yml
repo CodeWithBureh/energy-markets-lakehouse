@@ -140,6 +140,13 @@ jobs:
       - name: Seed history (manual runs only)
         if: github.event_name == 'workflow_dispatch' && inputs.seed_start_month != ''
         run: databricks bundle run -t ci energy_backfill --params "start_month=${{ inputs.seed_start_month }},end_month=current"
+      - name: Run the forecast archive job
+        # Before the daily job, whose pipeline refresh picks its files up, as in prod. Only a
+        # warning if it fails: Open-Meteo's Previous Runs API can be unreachable from
+        # Databricks for hours, and the backtest catches up on the next run.
+        run: |
+          databricks bundle run -t ci energy_forecast_archive ||
+            echo "::warning::energy_forecast_archive failed; see the run in Databricks"
       - name: Run the daily job end to end
         # The ci copy only runs on pushes to dev, not daily, so the rolling windows (Elexon's
         # is 3 days) can miss days: the day of the last run, landed part-way through, would

@@ -154,7 +154,7 @@ Setup (once):
 | --- | --- |
 | Pull request into `dev` or `main` | ruff, pytest with coverage, build the wheel and start each entry point, `bundle validate` for `ci` and `prod` |
 | Pull request into `main` | also: the source branch must be `dev` (or `hotfix/*`) |
-| Push to `dev` | `bundle deploy -t ci`, pipeline validate-only update, the full `energy_daily` job (fails on `SUCCESS_WITH_FAILURES` too), then `energy_checks`; if all pass, `promote` opens the `dev` → `main` pull request with auto-merge |
+| Push to `dev` | `bundle deploy -t ci`, pipeline validate-only update, `energy_forecast_archive` (a warning if it fails), the full `energy_daily` job (fails on `SUCCESS_WITH_FAILURES` too), then `energy_checks`; if all pass, `promote` opens the `dev` → `main` pull request with auto-merge |
 | Push to `main` | `bundle deploy -t prod`, pipeline validate-only update, `energy_checks` against prod data (read-only; the schedule owns the runs) |
 
 `energy_checks` (`src/energy_lakehouse/checks.py`) fails the run when a required check
@@ -220,8 +220,8 @@ Add `refetch=true` to force a full re-download (e.g. after fixing a parser).
 The settle periods live in `SETTLE_DAYS` in `src/energy_lakehouse/landing.py`. The weather
 forecast is new every run, so it is never skipped.
 
-**The weather forecast archive** (`weather_forecast_archive`, part of `energy_daily` and every
-market backfill) rebuilds past outlook issues from Open-Meteo's
+**The weather forecast archive** (`weather_forecast_archive`, its own `energy_forecast_archive` job at 06:40
+and part of every market backfill) rebuilds past outlook issues from Open-Meteo's
 [Previous Runs API](https://open-meteo.com/en/docs/previous-runs-api): for each day since
 14 Mar 2024, the forecast for D+1 to D+7 as it stood at 07:40 UK time, using for each hour the
 newest forecast made by then. The archive keeps forecasts up to 7 days before valid time, so
@@ -231,7 +231,7 @@ for runs not made yet, so a younger issue isn't trusted); on days with a live fe
 outlook uses that instead. The whole history is about 11,000 calls by
 Open-Meteo's count against a free limit of 10,000 a day, so the first full backfill can stop
 partway with HTTP 429; rerun it the next day and the months already landed are skipped.
-After that, `energy_daily` adds each issue 2 days on, refetching the issues from 14 to 2 days
+After that, `energy_forecast_archive` adds each issue 2 days on, refetching the issues from 14 to 2 days
 ago so a missed run catches up.
 
 ### 5. Prod
