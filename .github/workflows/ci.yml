@@ -109,7 +109,7 @@ jobs:
       DATABRICKS_CLIENT_SECRET: ${{ matrix.target == 'prod' && secrets.DATABRICKS_CLIENT_SECRET || secrets.DEV_DATABRICKS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v7
-      - uses: databricks/setup-cli@v1.26.0
+      - uses: databricks/setup-cli@v1.28.0
       - run: databricks bundle validate -t ${{ matrix.target }}
 
   deploy-dev:
@@ -129,7 +129,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install build
-      - uses: databricks/setup-cli@v1.26.0
+      - uses: databricks/setup-cli@v1.28.0
       - run: databricks bundle validate -t ci
       - run: databricks bundle deploy -t ci
       - name: Pipeline validate-only update (checks the bronze/silver/gold code, processes no data)
@@ -227,7 +227,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install build
-      - uses: databricks/setup-cli@v1.26.0
+      - uses: databricks/setup-cli@v1.28.0
       - run: databricks bundle validate -t prod
       - run: databricks bundle deploy -t prod
       - name: Pipeline validate-only update
