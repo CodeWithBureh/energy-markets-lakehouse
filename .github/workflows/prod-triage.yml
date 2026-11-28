@@ -1,0 +1,100 @@
+# Each morning, check the latest prod run of each scheduled job. On a failure:
+#  1. a source error (HTTP 429/5xx, timeouts, broken responses) is repaired once;
+#  2. if that fixes it, an issue records what happened;
+#  3. otherwise Claude Code investigates, opens an issue with the diagnosis and, when the
+#     fix is in our code, a pull request against dev. It never merges: merging to dev
+#     promotes to prod, and that stays a person's decision.
+name: prod-triage
+
+on:
+  schedule:
+    - cron: "40 8 * * *"         # 08:40 UTC: after energy_daily (07:40 UK) and its retries
+  workflow_dispatch:
+
+concurrency:
+  group: prod-triage
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    env:
+      # Read and repair runs only; the prod service principal, as deploy-prod.
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: dev
+      - uses: databricks/setup-cli@v1.26.0
+
+      - name: Check last night's prod runs
+        id: report
+        run: bash .github/scripts/prod_runs.sh report triage-report.md >>"$GITHUB_OUTPUT"
+
+      - name: Repair a source error once
+        id: repair
+        if: steps.report.outputs.failed != '0' && steps.report.outputs.transient == 'true'
+        run: bash .github/scripts/prod_runs.sh repair >>"$GITHUB_OUTPUT"
+
+      - name: Record a failure the repair fixed
+        if: steps.repair.outputs.fixed == 'true'
+        run: |
+          {
+            echo "This morning's prod run failed on what looked like a source error, and one"
+            echo "automatic repair (failed tasks and the ones after them) succeeded."
+            echo "Nothing to do unless this keeps happening."
+            echo
+            cat triage-report.md
+          } >issue.md
+          gh issue create --title "Prod run failed and was repaired ($(date -u +%F))" \
+            --label prod-failure --body-file issue.md ||
+            gh issue create --title "Prod run failed and was repaired ($(date -u +%F))" \
+              --body-file issue.md
+
+      - uses: actions/setup-python@v7
+        if: steps.report.outputs.failed != '0' && steps.repair.outputs.fixed != 'true'
+        with:
+          python-version: "3.12"
+      - if: steps.report.outputs.failed != '0' && steps.repair.outputs.fixed != 'true'
+        run: pip install -e ".[dev]"
+
+      - name: Investigate
+        if: steps.report.outputs.failed != '0' && steps.repair.outputs.fixed != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          prompt: |
+            A scheduled prod Databricks job in this repository failed. triage-report.md
+            has each failed run with its task errors and log tails. Automatic repair:
+            ${{ steps.repair.outputs.fixed == 'false' && 'tried once, still failing' || 'not tried (did not look like a source error)' }}.
+
+            1. Find the cause. Read the code under src/ and resources/, the tests, and
+               docs/setup.md. You may inspect prod runs read-only with
+               `databricks jobs get-run`, `get-run-output` and `list-runs`.
+            2. Open one GitHub issue (`gh issue create`) titled
+               "Prod run failed: <job> <task> (<date>)": what failed, the evidence, the
+               cause, the impact on data, and what you recommend.
+            3. If the fix belongs in this repository's code or config: branch from dev
+               (`fix/prod-<date>-<short-name>`), make the smallest change that fixes it, add
+               or update a test, run `ruff check src tests` and
+               `python -m pytest -q --ignore=tests/pipeline`, commit, push, and open a pull
+               request against dev that links the issue. End the pull request body with
+               "🤖 Generated with [Claude Code](https://claude.com/claude-code)".
+            4. If it is outside our control (a source outage, an expired credential, a
+               quota), say so in the issue and what the owner should do; don't change code.
+
+            Never merge a pull request, push to dev or main, run or repair a job, or run
+            terraform. Match the style of the surrounding code and docs.
+          claude_args: >-
+            --max-turns 60
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(gh issue create:*),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh pr list:*),Bash(databricks jobs get-run:*),Bash(databricks jobs get-run-output:*),Bash(databricks jobs list-runs:*),Bash(databricks jobs list:*),Bash(pip install:*),Bash(python -m pytest:*),Bash(ruff:*),Bash(ls:*),Bash(cat:*)"
