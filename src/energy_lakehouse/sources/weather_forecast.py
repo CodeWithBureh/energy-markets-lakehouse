@@ -153,18 +153,36 @@ def fetch_archive(session: requests.Session, first_issue: date, last_issue: date
                       for n in range(1, MAX_LEAD_DAYS + 1))
     issue_days = [first_issue + timedelta(days=i)
                   for i in range((last_issue - first_issue).days + 1)]
+    params = {
+        "hourly": hourly, "wind_speed_unit": "ms", "timezone": "UTC",
+        # UTC dates: D+1 starts at 23:00 UTC on D in summer.
+        "start_date": first_issue.isoformat(),
+        "end_date": (last_issue + timedelta(days=OUTLOOK_DAYS + 1)).isoformat(),
+    }
     rows = []
     for i in range(0, len(points), CHUNK):
-        chunk = points[i:i + CHUNK]
-        resp = session.get(ARCHIVE_URL, params={
-            "latitude": ",".join(str(p[0]) for p in chunk),
-            "longitude": ",".join(str(p[1]) for p in chunk),
-            "hourly": hourly, "wind_speed_unit": "ms", "timezone": "UTC",
-            # UTC dates: D+1 starts at 23:00 UTC on D in summer.
-            "start_date": first_issue.isoformat(),
-            "end_date": (last_issue + timedelta(days=OUTLOOK_DAYS + 1)).isoformat(),
-        }, timeout=DEFAULT_TIMEOUT)
-        resp.raise_for_status()
-        body = resp.json()
-        rows += parse_archive(body if isinstance(body, list) else [body], chunk, issue_days)
+        rows += _fetch_archive_points(session, points[i:i + CHUNK], params, issue_days)
     return rows
+
+
+def _fetch_archive_points(session: requests.Session, points: list[tuple[float, float]],
+                          params: dict, issue_days: list[date]) -> list[dict]:
+    """One request for ``points``. A body that isn't valid JSON is asked for again in halves:
+    on 28 Nov 2026 the API returned the same malformed body for one 50-point request on every
+    retry, and smaller requests are different URLs."""
+    resp = session.get(ARCHIVE_URL, params={
+        "latitude": ",".join(str(p[0]) for p in points),
+        "longitude": ",".join(str(p[1]) for p in points), **params,
+    }, timeout=DEFAULT_TIMEOUT)
+    resp.raise_for_status()
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        if len(points) == 1:
+            pos = getattr(exc, "pos", 0)
+            raise ValueError(f"Open-Meteo returned invalid JSON for {points[0]}: {exc}; "
+                             f"near {resp.text[max(pos - 80, 0):pos + 40]!r}") from exc
+        half = len(points) // 2
+        return (_fetch_archive_points(session, points[:half], params, issue_days)
+                + _fetch_archive_points(session, points[half:], params, issue_days))
+    return parse_archive(body if isinstance(body, list) else [body], points, issue_days)
