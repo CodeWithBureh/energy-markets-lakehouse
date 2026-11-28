@@ -1,6 +1,7 @@
-# Two scheduled jobs and an on-demand backfill job, all on serverless compute.
+# Three scheduled jobs and an on-demand backfill job, all on serverless compute.
 #  - energy_daily:  ingest Elexon / ENTSO-E / FRED / stocks / gas / weather forecast, then
 #    refresh the pipeline
+#  - energy_forecast_archive: past forecast issues for the outlook backtest, an hour earlier
 #  - energy_weekly_weather: pull a week of ERA5 (CDS queues can be slow, so weekly keeps
 #    the billed waiting time down)
 #  - energy_backfill: on-demand history backfill, month by month (see below)
@@ -138,13 +139,52 @@ resources:
               - --source=weather_forecast
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
 
+        - task_key: refresh_pipeline
+          # One flaky source shouldn't stop the others from flowing through.
+          run_if: AT_LEAST_ONE_SUCCESS
+          depends_on:
+            - task_key: ingest_elexon
+            - task_key: ingest_entsoe
+            - task_key: ingest_fred
+            - task_key: ingest_stocks
+            - task_key: ingest_gas
+            - task_key: ingest_weather_forecast
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.energy_pipeline.id}
+            full_refresh: false
+
+    # Past forecast issues for the outlook backtest, kept out of energy_daily: Open-Meteo's
+    # Previous Runs API can be slow or return broken responses from Databricks (28 Nov 2026),
+    # and the backtest can wait a day. Runs an hour before energy_daily, whose pipeline
+    # refresh picks the files up. Each issue is rebuilt 2 days on, once every forecast it
+    # uses has been made; the default window refetches the issues from 14 to 2 days ago,
+    # so a failed day catches up on the next run.
+    energy_forecast_archive:
+      name: energy-forecast-archive
+      max_concurrent_runs: 1
+      timeout_seconds: 2400
+      schedule:
+        quartz_cron_expression: "0 40 6 * * ?"     # 06:40 UK time
+        timezone_id: Europe/London
+        pause_status: ${var.schedule_pause}
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+      tags:
+        project: energy-markets-lakehouse
+      parameters:
+        - name: start
+          default: ""
+        - name: end
+          default: ""
+      environments:
+        - environment_key: ingest
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ../dist/*.whl
+      tasks:
         - task_key: ingest_weather_forecast_archive
-          # Each day's issue is rebuilt from the archive 2 days on, once every forecast it uses
-          # has been made, so the outlook backtest keeps up. The default window refetches the
-          # issues from 14 to 2 days ago, catching up after missed runs: a few calls a day
-          # against Open-Meteo's 10,000.
-          email_notifications:                       # job-level alerts skip SUCCESS_WITH_FAILURES
-            on_failure: [ "${var.alert_email}" ]
           environment_key: ingest
           timeout_seconds: 600
           max_retries: 2
@@ -157,21 +197,6 @@ resources:
               - --start={{job.parameters.start}}
               - --end={{job.parameters.end}}
               - --landing-root=/Volumes/${var.catalog}/${resources.schemas.raw.name}/landing
-
-        - task_key: refresh_pipeline
-          # One flaky source shouldn't stop the others from flowing through.
-          run_if: AT_LEAST_ONE_SUCCESS
-          depends_on:
-            - task_key: ingest_elexon
-            - task_key: ingest_entsoe
-            - task_key: ingest_fred
-            - task_key: ingest_stocks
-            - task_key: ingest_gas
-            - task_key: ingest_weather_forecast
-            - task_key: ingest_weather_forecast_archive
-          pipeline_task:
-            pipeline_id: ${resources.pipelines.energy_pipeline.id}
-            full_refresh: false
 
     energy_weekly_weather:
       name: energy-weekly-weather
