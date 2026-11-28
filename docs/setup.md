@@ -156,6 +156,8 @@ Setup (once):
 | Pull request into `main` | also: the source branch must be `dev` (or `hotfix/*`) |
 | Push to `dev` | `bundle deploy -t ci`, pipeline validate-only update, the full `energy_daily` job (fails on `SUCCESS_WITH_FAILURES` too), then `energy_checks`; if all pass, `promote` opens the `dev` → `main` pull request with auto-merge |
 | Push to `main` | `bundle deploy -t prod`, pipeline validate-only update, `energy_checks` against prod data (read-only; the schedule owns the runs) |
+| Daily, 08:40 UTC (`prod-triage.yml`) | checks the latest prod run of each scheduled job; a source error (HTTP 429/5xx, timeouts, broken responses) is repaired once and recorded in an issue; anything else, or a repair that fails, goes to Claude Code, which opens an issue with the diagnosis and, if the fix is in this repository, a pull request against `dev`. Needs the `ANTHROPIC_API_KEY` secret |
+| `@claude` in an issue or pull request comment (`claude.yml`) | Claude Code answers in the thread and can push fixes to a branch and open pull requests. Only the repository owner can trigger it. Neither workflow merges anything |
 
 `energy_checks` (`src/energy_lakehouse/checks.py`) fails the run when a required check
 fails: every silver and gold table has rows, current silver rows are unique on their keys,
