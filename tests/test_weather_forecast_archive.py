@@ -1,4 +1,8 @@
+import json
+import re
 from datetime import date, datetime, timedelta, timezone
+
+import pytest
 
 from energy_lakehouse import cli
 from energy_lakehouse.sources import weather_forecast as wf
@@ -84,6 +88,47 @@ def test_fetch_archive_asks_for_every_lead_and_the_whole_last_week():
     assert "wind_speed_100m_previous_day7" in p["hourly"]
     assert "temperature_2m_previous_day1" in p["hourly"]
     assert len({r["issued_utc"] for r in rows}) == 2
+
+
+class _BadJson:
+    text = '[{"hourly": {"time": ["2026-01-10T00:00" "x"]}}]'
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return json.loads(self.text)
+
+
+class BrokenSession(FakeSession):
+    """Malformed body for any request covering ``bad``."""
+
+    def __init__(self, bad, min_points=0):
+        super().__init__()
+        self.bad, self.min_points = bad, min_points
+
+    def get(self, url, params, timeout):
+        lats = [float(x) for x in params["latitude"].split(",")]
+        lons = [float(x) for x in params["longitude"].split(",")]
+        if self.bad in zip(lats, lons) and len(lats) > self.min_points:
+            self.params.append(params)
+            return _BadJson()
+        return super().get(url, params, timeout)
+
+
+def test_fetch_archive_splits_a_request_whose_body_is_not_json():
+    # 28 Nov 2026: one 50-point request came back malformed on every retry.
+    bad = wf.grid_points()[7]
+    s = BrokenSession(bad, min_points=25)
+    rows = wf.fetch_archive(s, date(2026, 1, 10), date(2026, 1, 10))
+    assert [len(p["latitude"].split(",")) for p in s.params] == [50, 25, 25, 50, 10]
+    assert {(r["latitude"], r["longitude"]) for r in rows} == set(wf.grid_points())
+
+
+def test_fetch_archive_names_a_point_that_never_parses():
+    bad = wf.grid_points()[7]
+    with pytest.raises(ValueError, match=re.escape(str(bad))):
+        wf.fetch_archive(BrokenSession(bad), date(2026, 1, 10), date(2026, 1, 10))
 
 
 def test_runner_lands_complete_issues_once_per_month(tmp_path, monkeypatch):
