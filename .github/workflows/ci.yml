@@ -60,7 +60,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - uses: actions/setup-java@v4            # local Spark for the pipeline tests
+      - uses: actions/setup-java@v6            # local Spark for the pipeline tests
         with:
           distribution: temurin
           java-version: "17"
